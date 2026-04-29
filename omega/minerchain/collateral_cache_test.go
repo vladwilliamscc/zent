@@ -1,6 +1,8 @@
 package minerchain
 
 import (
+	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -356,6 +358,114 @@ func TestCollateralCacheRefreshIfStale(t *testing.T) {
 	}
 	if entry.State != StateEligible {
 		t.Fatalf("stale refresh did not restore eligibility: got %v", entry.State)
+	}
+}
+
+func TestCollateralSelectorPickEligibleFilters(t *testing.T) {
+	const required = int64(100) * collateralHaoPerCoin
+	owner := testOwner(9)
+	otherOwner := testOwner(10)
+
+	cache := newCollateralCacheWithExpectedOwners(collateralCacheBackend{}, owner)
+	good := testOutPoint(13, 0)
+	lowAmount := testOutPoint(14, 0)
+	wrongToken := testOutPoint(15, 0)
+	wrongOwner := testOutPoint(16, 0)
+	stale := testOutPoint(17, 0)
+	spent := testOutPoint(18, 0)
+	notFound := testOutPoint(19, 0)
+	amountInsufficient := testOutPoint(20, 0)
+
+	putTestCollateralEntry(cache, good, owner, int64(150)*collateralHaoPerCoin, common.FeeCoinTyp, StateEligible)
+	putTestCollateralEntry(cache, lowAmount, owner, int64(99)*collateralHaoPerCoin, common.FeeCoinTyp, StateEligible)
+	putTestCollateralEntry(cache, wrongToken, owner, int64(150)*collateralHaoPerCoin, common.FeeCoinTyp+1, StateEligible)
+	putTestCollateralEntry(cache, wrongOwner, otherOwner, int64(150)*collateralHaoPerCoin, common.FeeCoinTyp, StateEligible)
+	putTestCollateralEntry(cache, stale, owner, int64(150)*collateralHaoPerCoin, common.FeeCoinTyp, StateStale)
+	putTestCollateralEntry(cache, spent, owner, int64(150)*collateralHaoPerCoin, common.FeeCoinTyp, StateSpent)
+	putTestCollateralEntry(cache, notFound, owner, int64(150)*collateralHaoPerCoin, common.FeeCoinTyp, StateNotFound)
+	putTestCollateralEntry(cache, amountInsufficient, owner, int64(150)*collateralHaoPerCoin, common.FeeCoinTyp, StateAmountInsufficient)
+
+	picks := cache.PickEligible(owner, required, nil)
+	if len(picks) != 1 || picks[0] != good {
+		t.Fatalf("PickEligible filter mismatch: got %v want only %v", picks, good)
+	}
+}
+
+func TestCollateralSelectorPickEligibleExcludesRecentWindow(t *testing.T) {
+	const required = int64(100) * collateralHaoPerCoin
+	owner := testOwner(11)
+	cache := newCollateralCacheWithExpectedOwners(collateralCacheBackend{}, owner)
+	keep := testOutPoint(21, 0)
+	exclude := testOutPoint(22, 0)
+
+	putTestCollateralEntry(cache, keep, owner, int64(150)*collateralHaoPerCoin, common.FeeCoinTyp, StateEligible)
+	putTestCollateralEntry(cache, exclude, owner, int64(150)*collateralHaoPerCoin, common.FeeCoinTyp, StateEligible)
+
+	picks := cache.PickEligible(owner, required, map[wire.OutPoint]struct{}{exclude: struct{}{}})
+	if len(picks) != 1 || picks[0] != keep {
+		t.Fatalf("PickEligible recent-window exclusion mismatch: got %v want only %v", picks, keep)
+	}
+}
+
+func TestCollateralSelectorPickEligibleReadOnly(t *testing.T) {
+	const required = int64(100) * collateralHaoPerCoin
+	owner := testOwner(12)
+	op := testOutPoint(23, 0)
+
+	fake := newFakeCollateralBackend(required)
+	fake.setUTXO(op, owner, int64(150)*collateralHaoPerCoin, common.FeeCoinTyp)
+	cache := newCollateralCacheWithExpectedOwners(fake.backend(), owner)
+	if _, err := cache.HookAddCollateral(op); err != nil {
+		t.Fatalf("HookAddCollateral error: %v", err)
+	}
+
+	fetches := fake.fetchCount()
+	picks := cache.PickEligible(owner, required, nil)
+	if len(picks) != 1 || picks[0] != op {
+		t.Fatalf("PickEligible read-only pick mismatch: got %v want only %v", picks, op)
+	}
+	if fake.fetchCount() != fetches {
+		t.Fatalf("PickEligible fetched from backend: got %d want %d", fake.fetchCount(), fetches)
+	}
+}
+
+func TestCollateralSelectorPickEligibleNoCandidate(t *testing.T) {
+	const required = int64(100) * collateralHaoPerCoin
+	owner := testOwner(13)
+	cache := newCollateralCacheWithExpectedOwners(collateralCacheBackend{}, owner)
+	op := testOutPoint(24, 0)
+	putTestCollateralEntry(cache, op, owner, int64(50)*collateralHaoPerCoin, common.FeeCoinTyp, StateAmountInsufficient)
+
+	picks := cache.PickEligible(owner, required, nil)
+	if picks != nil {
+		t.Fatalf("PickEligible returned candidates unexpectedly: %v", picks)
+	}
+}
+
+func TestCollateralSelectorCheckCollateralFailureRefreshPath(t *testing.T) {
+	contents, err := os.ReadFile("mining.go")
+	if err != nil {
+		t.Fatalf("read mining.go: %v", err)
+	}
+
+	source := string(contents)
+	if !strings.Contains(source, "CheckCollateral(block") {
+		t.Fatalf("CheckCollateral call path missing from mining.go")
+	}
+	if !strings.Contains(source, "m.collateralCache.RefreshOne(*block.MsgBlock().Utxos)") {
+		t.Fatalf("collateral cache RefreshOne path after CheckCollateral failure missing")
+	}
+}
+
+func putTestCollateralEntry(cache *CollateralCache, op wire.OutPoint, owner [20]byte, amount int64, tokenType uint64, state CollateralState) {
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	cache.entries[op] = CollateralEntry{
+		OutPoint:  op,
+		Amount:    amount,
+		TokenType: tokenType,
+		OwnerHash: owner,
+		State:     state,
 	}
 }
 
