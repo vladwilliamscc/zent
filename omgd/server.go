@@ -3663,6 +3663,7 @@ func newServer(listenAddrs []string, db, minerdb database.DB, prot *Protocol, in
 		} else {
 			mcfg := &minerchain.Config{
 				ChainParams:            prot.activeNetParams,
+				MinerWorkers:           prot.cfg.MinerWorkers,
 				BlockTemplateGenerator: blockTemplateGenerator,
 				ProcessBlock:           s.syncManager.ProcessMinerBlock,
 				ConnectedCount:         s.ConnectedCount,
