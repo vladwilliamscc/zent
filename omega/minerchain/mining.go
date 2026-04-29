@@ -16,7 +16,6 @@ import (
 	"btcd/blockchain"
 	"btcd/blockchain/chainutil"
 	"btcd/chaincfg"
-	"btcd/database"
 	"btcd/mining"
 	"btcd/wire"
 	"btcd/wire/common"
@@ -122,6 +121,8 @@ type CPUMiner struct {
 	quit              chan struct{}
 	miningkeys        chan btcutil.Address
 	Stale             bool
+	collateralCacheMu sync.Mutex
+	collateralCache   *CollateralCache
 }
 
 // speedMonitor handles tracking the number of hashes per second the mining
@@ -392,22 +393,17 @@ func (m *CPUMiner) ChangeMiningKey(miningAddr btcutil.Address) {
 }
 
 func (m *CPUMiner) DropCollateral(h chainhash.Hash, index uint32) {
-	m.g.Chain.Miners.DropCollateral(h, index)
+	if m.g != nil && m.g.Chain != nil && m.g.Chain.Miners != nil {
+		m.g.Chain.Miners.DropCollateral(h, index)
+	}
 	p := wire.OutPoint{
 		Hash:  h,
 		Index: index,
 	}
 
-	m.submitBlockLock.Lock()
-	defer m.submitBlockLock.Unlock()
-
-	for k, t := range m.g.Collateral {
-		for i, q := range t {
-			if q.Equal(&p) {
-				m.g.Collateral[k] = append(t[:i], t[i+1:]...)
-				return
-			}
-		}
+	m.removeCollateral(p)
+	if m.collateralCache != nil {
+		m.collateralCache.HookDropCollateral(p)
 	}
 }
 
@@ -427,21 +423,21 @@ func (m *CPUMiner) AddCollateral(h chainhash.Hash, index uint32) {
 		Hash:  h,
 		Index: index,
 	}
-	e, err := m.g.Chain.FetchUtxoEntry(p)
+
+	cache := m.ensureCollateralCache()
+	if cache == nil {
+		return
+	}
+
+	entry, err := cache.HookAddCollateral(p)
 	if err != nil {
 		return
 	}
-	var addr [20]byte
-	copy(addr[:], e.PkScript()[1:])
-
-	m.submitBlockLock.Lock()
-	if t, ok := m.g.Collateral[addr]; ok {
-		t = append(t, &p)
-		m.g.Collateral[addr] = t
-	} else {
-		m.g.Collateral[addr] = []*wire.OutPoint{&p}
+	if !collateralEntryHasOwner(entry) {
+		return
 	}
-	m.submitBlockLock.Unlock()
+
+	m.appendCollateral(entry.OwnerHash, p, false)
 }
 
 func (m *CPUMiner) MiningKeys() []btcutil.Address {
@@ -733,6 +729,11 @@ out:
 		v, err := m.g.Chain.CheckCollateral(block, nil, 0)
 		if err != nil {
 			log.Infof(err.Error())
+			if m.collateralCache != nil && block.MsgBlock().Utxos != nil {
+				if _, refreshErr := m.collateralCache.RefreshOne(*block.MsgBlock().Utxos); refreshErr != nil {
+					log.Infof("collateral cache refresh after CheckCollateral failure: %v", refreshErr)
+				}
+			}
 			time.Sleep(time.Second * 5)
 			continue
 		}
@@ -850,38 +851,9 @@ func (m *CPUMiner) Start() {
 	defer m.Unlock()
 
 	if m.g.Chain != nil {
-		m.submitBlockLock.Lock()
-		m.g.Chain.Miners.(*MinerChain).db.View(func(dbTx database.Tx) error {
-			bucket := dbTx.Metadata().Bucket([]byte(common.MiningCollaterals))
-			cursor := bucket.Cursor()
-			for ok := cursor.First(); ok; ok = cursor.Next() {
-				op := cursor.Key()
-				p := wire.OutPoint{}
-				copy(p.Hash[:], op)
-				p.Index = common.LittleEndian.Uint32(op[32:])
-
-				e, err := m.g.Chain.FetchUtxoEntry(p)
-				if err != nil || e == nil {
-					continue
-				}
-				var addr [20]byte
-
-				pks := e.PkScript()
-				if pks == nil {
-					continue
-				}
-				copy(addr[:], pks[1:])
-
-				if t, ok := m.g.Collateral[addr]; ok {
-					t = append(t, &p)
-					m.g.Collateral[addr] = t
-				} else {
-					m.g.Collateral[addr] = []*wire.OutPoint{&p}
-				}
-			}
-			return nil
-		})
-		m.submitBlockLock.Unlock()
+		audit := m.loadPersistedCollaterals()
+		log.Infof("collateral cache persisted load audit: loaded=%d not_found=%d token_mismatch=%d owner_mismatch=%d",
+			audit.Loaded, audit.NotFound, audit.TokenMismatch, audit.OwnerMismatch)
 	}
 
 	// Nothing to do if the miner is already running or if running in
@@ -996,7 +968,7 @@ func NewMiner(cfg *Config) *CPUMiner {
 	}
 	log.Infof("Mining with %d threads", workers)
 
-	return &CPUMiner{
+	miner := &CPUMiner{
 		g:                 cfg.BlockTemplateGenerator,
 		cfg:               *cfg,
 		numWorkers:        uint32(workers),
@@ -1005,6 +977,8 @@ func NewMiner(cfg *Config) *CPUMiner {
 		updateHashes:      make(chan uint64),
 		miningkeys:        make(chan btcutil.Address, 10),
 	}
+	miner.initCollateralCache()
+	return miner
 }
 
 func (b *MinerChain) choiceOfChain() (*chainutil.BlockNode, int32) {
