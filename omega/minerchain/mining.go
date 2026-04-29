@@ -62,6 +62,10 @@ type Config struct {
 	// associated with.
 	ChainParams *chaincfg.Params
 
+	// MinerWorkers configures the miner-chain solver worker count.  Values
+	// less than one use the legacy SigVeriConcurrency-derived default.
+	MinerWorkers int
+
 	// ExternalIPs, the ip we listen on
 	ExternalIPs []string
 
@@ -963,14 +967,22 @@ func (m *CPUMiner) NumWorkers() int32 {
 	return int32(m.numWorkers)
 }
 
+func minerWorkerCount(cfg *Config) int {
+	workers := cfg.MinerWorkers
+	if workers <= 0 {
+		workers = cfg.ChainParams.SigVeriConcurrency - 1
+	}
+	if workers <= 0 {
+		workers = 1
+	}
+	return workers
+}
+
 // New returns a new instance of a CPU miner for the provided configuration.
 // Use Start to begin the mining process.  See the documentation for CPUMiner
 // type for more details.
 func NewMiner(cfg *Config) *CPUMiner {
-	workers := cfg.ChainParams.SigVeriConcurrency - 1
-	if workers <= 0 {
-		workers = 1
-	}
+	workers := minerWorkerCount(cfg)
 	log.Infof("Mining with %d threads", workers)
 
 	miner := &CPUMiner{

@@ -170,6 +170,7 @@ type config struct {
 	Chainback       bool   `long:"chainback" description:"back one tx block"`
 	Minerback       bool   `long:"minerback" description:"back one miner block"`
 	Concurrency     int    `long:"concurrency" description:"Concurrency"`
+	MinerWorkers    int    `long:"miner-workers" description:"Number of miner-chain solver workers; defaults to --concurrency - 1"`
 	LogBlockTime    bool   `long:"logblocktime" description:"Log the time that blocks are received"`
 	Accounts        bool   `long:"accounts" description:"list omega accounts & balance"`
 	NetMagic        uint32
