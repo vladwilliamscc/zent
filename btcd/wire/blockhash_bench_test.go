@@ -128,6 +128,60 @@ func TestMingingRightBlockHashMatchesSerializationEdgeCases(t *testing.T) {
 	assertMinerBlockHashMatchesSerialization(t, "varint-boundary-large-header", header)
 }
 
+func TestMingingRightBlockNonceSearchSerializationPatch(t *testing.T) {
+	nonces := []int32{0, 1, 0x7fffffff, -1}
+
+	for _, item := range minerBlockHashBenchmarkHeaders() {
+		header := *item.header
+		var scratch [MaxMinerBlockHeaderPayload]byte
+		serialized, nonceOffset := header.SerializeForNonceSearch(scratch[:0])
+		if nonceOffset != MingingRightBlockNonceOffset {
+			t.Fatalf("%s: nonce offset = %d, want %d", item.name, nonceOffset, MingingRightBlockNonceOffset)
+		}
+		if nonceOffset != 76 {
+			t.Fatalf("%s: nonce offset = %d, want locked offset 76", item.name, nonceOffset)
+		}
+
+		var original bytes.Buffer
+		if err := header.Serialize(&original); err != nil {
+			t.Fatalf("%s: serialize original header: %v", item.name, err)
+		}
+		if !bytes.Equal(serialized, original.Bytes()) {
+			t.Fatalf("%s: nonce-search serialization differs from full Serialize", item.name)
+		}
+
+		for _, nonce := range nonces {
+			patched := append([]byte(nil), serialized...)
+			if err := PatchMingingRightBlockNonce(patched, nonceOffset, nonce); err != nil {
+				t.Fatalf("%s nonce %d: patch nonce: %v", item.name, nonce, err)
+			}
+
+			wantHeader := header
+			wantHeader.Nonce = nonce
+			var wantSerialized bytes.Buffer
+			if err := wantHeader.Serialize(&wantSerialized); err != nil {
+				t.Fatalf("%s nonce %d: serialize patched header: %v", item.name, nonce, err)
+			}
+			if !bytes.Equal(patched, wantSerialized.Bytes()) {
+				t.Fatalf("%s nonce %d: patched bytes differ from full Serialize", item.name, nonce)
+			}
+
+			wantHash := wantHeader.BlockHash()
+			if gotHash := chainhash.DoubleHashH(patched); gotHash != wantHash {
+				t.Fatalf("%s nonce %d: patched hash = %x, want %x", item.name, nonce, gotHash, wantHash)
+			}
+
+			var decoded MingingRightBlock
+			if err := decoded.Deserialize(bytes.NewReader(patched)); err != nil {
+				t.Fatalf("%s nonce %d: deserialize patched bytes: %v", item.name, nonce, err)
+			}
+			if decoded.Nonce != nonce {
+				t.Fatalf("%s nonce %d: decoded nonce = %d", item.name, nonce, decoded.Nonce)
+			}
+		}
+	}
+}
+
 func BenchmarkBlockHeaderBlockHash(b *testing.B) {
 	header := blockHashBenchmarkHeader()
 	b.ReportAllocs()
