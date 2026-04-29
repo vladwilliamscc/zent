@@ -188,8 +188,14 @@ func (m *MinerChain) checkProofOfWork(header *wire.MingingRightBlock, powLimit *
 		hash := header.BlockHash()
 		hashNum := HashToBig(&hash)
 
+		parentNode := m.index.LookupNode(&header.PrevBlock)
+		if parentNode == nil {
+			str := fmt.Sprintf("previous block %s is unknown for h1 denominator", &header.PrevBlock)
+			return ruleError(ErrPreviousBlockUnknown, str)
+		}
+
 		factor := int64(1)
-		h := uint32(m.index.LookupNode(&header.PrevBlock).Height)
+		h := uint32(parentNode.Height)
 		if flags&blockchain.BFWatingFactor == blockchain.BFWatingFactor {
 			factor = m.factorPOW(h, header.BestBlock)
 		}
@@ -202,16 +208,17 @@ func (m *MinerChain) checkProofOfWork(header *wire.MingingRightBlock, powLimit *
 		// h1 is collacteral factor, h2 is tps factor
 		//			factor *= 16
 
-		// for h1, we compare this block's coin & Collateral for simplicity
-		c := header.Collateral
-		if c == 0 {
-			c = 1
-		}
-
 		v, err := m.blockChain.CheckCollateral(wire.NewMinerBlock(header), &header.BestBlock, flags)
 		if err != nil {
 			return err
 		}
+
+		parentHeader := parentNode.Data.(*blockchainNodeData).block
+		c, err := EffectiveH1Collateral(header, parentHeader, parentNode.Height+1, m.chainParams)
+		if err != nil {
+			return ruleError(ErrUnexpectedDifficulty, err.Error())
+		}
+
 		h1 := int64(v / c)
 		if h1 < 1 {
 			h1 = 1

@@ -187,6 +187,19 @@ type GlobalParams struct { // The params that must be the same for every node in
 	RuleChangeActivationThreshold uint32
 	MinerConfirmationWindow       uint32
 
+	// H1DenominatorActivationStartHeight enables the miner-chain h1
+	// denominator rule that uses the parent miner block's Collateral.  A
+	// value of zero keeps the legacy current-header denominator.
+	H1DenominatorActivationStartHeight int32
+
+	// H1DenominatorActivationStopHeight returns the h1 denominator rule to
+	// the legacy current-header Collateral at and after this height.  A
+	// value of zero means the parent-denominator interval does not stop.
+	// Together with the start height, this is a non-retroactive schedule:
+	// once a height is mined, changing the interval that covers it is a
+	// consensus rule change.
+	H1DenominatorActivationStopHeight int32
+
 	// forfeiture
 	Forfeit                 forfeitureContract
 	ViolationReportDeadline int32

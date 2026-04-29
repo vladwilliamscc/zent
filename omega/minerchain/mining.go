@@ -730,18 +730,21 @@ out:
 
 		var h1, h2 int64
 
-		// for h1, we compare this block's coin & Collateral for simplicity
-		h := NodetoHeader(chainChoice)
-		c := h.Collateral
-		if c == 0 {
-			c = 1
-		}
 		v, err := m.g.Chain.CheckCollateral(block, nil, 0)
 		if err != nil {
 			log.Infof(err.Error())
 			time.Sleep(time.Second * 5)
 			continue
 		}
+
+		parentHeader := NodetoHeader(chainChoice)
+		c, err := EffectiveH1Collateral(block.MsgBlock(), &parentHeader, template.Height, m.cfg.ChainParams)
+		if err != nil {
+			log.Infof("h1_schedule helper error, abort template: %v", err)
+			time.Sleep(time.Second * 5)
+			continue
+		}
+
 		h1 = int64(v / c)
 		if h1 < 1 {
 			h1 = 1
