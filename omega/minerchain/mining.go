@@ -617,30 +617,27 @@ out:
 		var minerAddress [20]byte
 		copy(minerAddress[:], signAddr.ScriptAddress())
 
-		usable := make(map[wire.OutPoint]struct{})
-		for _, c := range m.g.Collateral[minerAddress] {
-			usable[*c] = struct{}{}
-		}
+		parentHeader := m.g.Chain.Miners.NodetoHeader(chainChoice)
+		requiredAmount := int64(parentHeader.Collateral) * collateralHaoPerCoin
+		excluded := make(map[wire.OutPoint]struct{})
 
 		for p, i := chainChoice, int32(0); i <= m.cfg.ChainParams.ViolationReportDeadline && p != nil; i++ {
 			if q := m.g.Chain.Miners.NodetoHeader(p).Utxos; q != nil {
-				delete(usable, *q)
+				excluded[*q] = struct{}{}
 			}
 			p = p.Parent
 		}
 
-		k := len(usable)
+		var eligible []wire.OutPoint
+		if m.collateralCache != nil {
+			eligible = m.collateralCache.PickEligible(minerAddress, requiredAmount, excluded)
+		}
+		k := len(eligible)
 
 		if k > 0 {
 			k = rand.Intn(k)
-
-			for c, _ := range usable {
-				if k == 0 {
-					uc = &c
-					break
-				}
-				k--
-			}
+			c := eligible[k]
+			uc = &c
 		}
 
 		if common.Licensed && uc == nil {
@@ -738,7 +735,6 @@ out:
 			continue
 		}
 
-		parentHeader := NodetoHeader(chainChoice)
 		c, err := EffectiveH1Collateral(block.MsgBlock(), &parentHeader, template.Height, m.cfg.ChainParams)
 		if err != nil {
 			log.Infof("h1_schedule helper error, abort template: %v", err)

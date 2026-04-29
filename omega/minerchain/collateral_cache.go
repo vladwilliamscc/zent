@@ -259,6 +259,37 @@ func (c *CollateralCache) RefreshIfStale(op wire.OutPoint, ttlBlocks int32) (Col
 	return entry, nil
 }
 
+func (c *CollateralCache) PickEligible(owner [20]byte, requiredAmount int64, excluded map[wire.OutPoint]struct{}) []wire.OutPoint {
+	if c == nil {
+		return nil
+	}
+
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	var picks []wire.OutPoint
+	for op, entry := range c.entries {
+		if entry.State != StateEligible {
+			continue
+		}
+		if entry.OwnerHash != owner {
+			continue
+		}
+		if entry.TokenType != common.FeeCoinTyp {
+			continue
+		}
+		if entry.Amount < requiredAmount {
+			continue
+		}
+		if _, ok := excluded[op]; ok {
+			continue
+		}
+		picks = append(picks, op)
+	}
+
+	return picks
+}
+
 func (c *CollateralCache) MarkSpent(op wire.OutPoint) bool {
 	if c == nil {
 		return false
