@@ -270,6 +270,8 @@ func (m *CPUMiner) solveBlock(header *mining.BlockTemplate, blockHeight int32, h
 
 	solver := func(start uint32, numWorkers uint32) {
 		locheader := *header.Block.(*wire.MingingRightBlock)
+		var serializedScratch [wire.MaxMinerBlockHeaderPayload]byte
+		serializedHeader, nonceOffset := locheader.SerializeForNonceSearch(serializedScratch[:0])
 		hashesCompleted := uint64(0)
 
 		ticker := time.NewTicker(time.Second * 5)
@@ -310,6 +312,7 @@ func (m *CPUMiner) solveBlock(header *mining.BlockTemplate, blockHeight int32, h
 						}
 
 						m.g.UpdateMinerBlockTime(&locheader)
+						serializedHeader, nonceOffset = locheader.SerializeForNonceSearch(serializedScratch[:0])
 
 					default:
 						// Non-blocking select to fall through
@@ -321,7 +324,12 @@ func (m *CPUMiner) solveBlock(header *mining.BlockTemplate, blockHeight int32, h
 				// increment the number of hashes completed for each
 				// attempt accordingly.
 				locheader.Nonce = int32(i)
-				hash := locheader.BlockHash()
+				if err := wire.PatchMingingRightBlockNonce(serializedHeader, nonceOffset, locheader.Nonce); err != nil {
+					log.Infof("miner nonce patch failed: %v", err)
+					resch <- nil
+					return
+				}
+				hash := chainhash.DoubleHashH(serializedHeader)
 				hashesCompleted += 2
 
 				// The block is solved when the new block hash is less
@@ -347,6 +355,7 @@ func (m *CPUMiner) solveBlock(header *mining.BlockTemplate, blockHeight int32, h
 				}
 			}
 			m.g.UpdateMinerBlockTime(&locheader)
+			serializedHeader, nonceOffset = locheader.SerializeForNonceSearch(serializedScratch[:0])
 		}
 	}
 

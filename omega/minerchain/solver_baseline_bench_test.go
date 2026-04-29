@@ -62,6 +62,12 @@ type solverBaselineWork struct {
 	factorPOW        int64
 }
 
+type solverNoncePatchWork struct {
+	solverBaselineWork
+	serializedHeader []byte
+	nonceOffset      int
+}
+
 func TestSolverBaselineHitSetGolden(t *testing.T) {
 	if *updateSolverBaselineGolden {
 		writeSolverBaselineGolden(t, buildSolverBaselineGoldenFixtures(t))
@@ -70,6 +76,31 @@ func TestSolverBaselineHitSetGolden(t *testing.T) {
 	fixtures := loadSolverBaselineFixtures(t)
 	for _, fixture := range fixtures {
 		runSolverBaselineFixture(t, fixture)
+	}
+}
+
+func TestSolverNoncePatchHitSetMatchesBaseline(t *testing.T) {
+	fixtures := loadSolverBaselineFixtures(t)
+	for _, fixture := range fixtures {
+		bits := parseSolverUint32Hex(t, fixture.Name, "bits_hex", fixture.BitsHex)
+		powLimit := parseSolverBigHex(t, fixture.Name, "pow_limit_hex", fixture.PowLimitHex)
+		startNonce := parseSolverUint32Hex(t, fixture.Name, "start_nonce_hex", fixture.StartNonceHex)
+		serializedHeader := decodeSolverHex(t, fixture.Name, "header_serialized_hex", fixture.HeaderSerializedHex)
+
+		var header wire.MingingRightBlock
+		if err := header.Deserialize(bytes.NewReader(serializedHeader)); err != nil {
+			t.Fatalf("%s: decode header: %v", fixture.Name, err)
+		}
+
+		work := prepareSolverBaselineWork(&header, bits, fixture.FactorPOW, fixture.H, powLimit)
+		baselineHits := collectSolverBaselineHits(work, startNonce, fixture.Iterations)
+		noncePatchHits := collectSolverNoncePatchHits(prepareSolverNoncePatchWork(work), startNonce, fixture.Iterations)
+		if !reflect.DeepEqual(noncePatchHits, baselineHits) {
+			t.Fatalf("%s: nonce-patch hit set mismatch\n got: %#v\nwant: %#v", fixture.Name, noncePatchHits, baselineHits)
+		}
+		if !reflect.DeepEqual(noncePatchHits, fixture.ExpectedHits) {
+			t.Fatalf("%s: nonce-patch hit set differs from golden\n got: %#v\nwant: %#v", fixture.Name, noncePatchHits, fixture.ExpectedHits)
+		}
 	}
 }
 
@@ -82,6 +113,25 @@ func BenchmarkSolverBaselineLoop(b *testing.B) {
 			for i := 0; i < b.N; i++ {
 				nonce := int32((testCase.startNonce + uint32(i)) & uint32(maxNonce))
 				if solverBaselineCandidateHit(work, nonce) {
+					hits++
+				}
+			}
+			solverBaselineHitSink = hits
+			b.ReportMetric(float64(b.N)/b.Elapsed().Seconds(), "H/s")
+		})
+	}
+}
+
+func BenchmarkSolverNoncePatchLoop(b *testing.B) {
+	for _, testCase := range solverBaselineCases() {
+		work := prepareSolverBaselineWork(testCase.header, testCase.bits, testCase.factorPOW, testCase.h, testCase.powLimit)
+		patchWork := prepareSolverNoncePatchWork(work)
+		b.Run(testCase.name, func(b *testing.B) {
+			hits := 0
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				nonce := int32((testCase.startNonce + uint32(i)) & uint32(maxNonce))
+				if solverNoncePatchCandidateHit(patchWork, nonce) {
 					hits++
 				}
 			}
@@ -158,6 +208,17 @@ func prepareSolverBaselineWork(header *wire.MingingRightBlock, bits uint32, fact
 	}
 }
 
+func prepareSolverNoncePatchWork(work solverBaselineWork) solverNoncePatchWork {
+	localHeader := *work.header
+	localHeader.Bits = work.bits
+	serializedHeader, nonceOffset := localHeader.SerializeForNonceSearch(make([]byte, 0, wire.MaxMinerBlockHeaderPayload))
+	return solverNoncePatchWork{
+		solverBaselineWork: work,
+		serializedHeader:   serializedHeader,
+		nonceOffset:        nonceOffset,
+	}
+}
+
 func solverBaselineCandidateHit(work solverBaselineWork, nonce int32) bool {
 	localHeader := *work.header
 	localHeader.Bits = work.bits
@@ -171,6 +232,23 @@ func solverBaselineCandidateHit(work solverBaselineWork, nonce int32) bool {
 	return hashNum.Cmp(work.targetDifficulty) <= 0
 }
 
+func solverNoncePatchCandidateHit(work solverNoncePatchWork, nonce int32) bool {
+	hash := solverNoncePatchHash(work, nonce)
+	hashNum := blockchain.HashToBig(&hash)
+	if hashNum.Cmp(work.powLimit) >= 0 {
+		return false
+	}
+	hashNum = hashNum.Mul(hashNum, big.NewInt(work.factorPOW))
+	return hashNum.Cmp(work.targetDifficulty) <= 0
+}
+
+func solverNoncePatchHash(work solverNoncePatchWork, nonce int32) chainhash.Hash {
+	if err := wire.PatchMingingRightBlockNonce(work.serializedHeader, work.nonceOffset, nonce); err != nil {
+		panic(err)
+	}
+	return chainhash.DoubleHashH(work.serializedHeader)
+}
+
 func collectSolverBaselineHits(work solverBaselineWork, startNonce uint32, iterations int) []solverBaselineHit {
 	hits := make([]solverBaselineHit, 0)
 	for i := 0; i < iterations; i++ {
@@ -179,6 +257,26 @@ func collectSolverBaselineHits(work solverBaselineWork, startNonce uint32, itera
 		localHeader.Bits = work.bits
 		localHeader.Nonce = nonce
 		hash := localHeader.BlockHash()
+		hashNum := blockchain.HashToBig(&hash)
+		if hashNum.Cmp(work.powLimit) >= 0 {
+			continue
+		}
+		hashNum = hashNum.Mul(hashNum, big.NewInt(work.factorPOW))
+		if hashNum.Cmp(work.targetDifficulty) <= 0 {
+			hits = append(hits, solverBaselineHit{
+				NonceHex:     fmt.Sprintf("%08x", uint32(nonce)),
+				BlockHashHex: hex.EncodeToString(hash[:]),
+			})
+		}
+	}
+	return hits
+}
+
+func collectSolverNoncePatchHits(work solverNoncePatchWork, startNonce uint32, iterations int) []solverBaselineHit {
+	hits := make([]solverBaselineHit, 0)
+	for i := 0; i < iterations; i++ {
+		nonce := int32((startNonce + uint32(i)) & uint32(maxNonce))
+		hash := solverNoncePatchHash(work, nonce)
 		hashNum := blockchain.HashToBig(&hash)
 		if hashNum.Cmp(work.powLimit) >= 0 {
 			continue

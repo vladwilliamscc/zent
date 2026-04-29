@@ -245,6 +245,10 @@ type BlockHeader struct {
 const blockHeaderLen = 84 // or 108 with Bits & IP
 const minerBlockLen = 180 // max len. if IPv6 address & port
 
+// MingingRightBlockNonceOffset is the byte offset of Nonce in the serialized
+// miner header prefix used for proof-of-work hashing.
+const MingingRightBlockNonceOffset = 4 + chainhash.HashSize + chainhash.HashSize + 4 + 4
+
 // BlockHash computes the block identifier hash for the given block header.
 func (h *BlockHeader) BlockHash() chainhash.Hash {
 	var buf [MaxBlockHeaderPayload]byte
@@ -337,6 +341,22 @@ func (h *MingingRightBlock) BlockHash() chainhash.Hash {
 	var buf [MaxMinerBlockHeaderPayload]byte
 	serialized := appendMinerBlockHashBytes(buf[:0], h)
 	return chainhash.DoubleHashH(serialized)
+}
+
+// SerializeForNonceSearch serializes the miner header hash bytes into buf and
+// returns the byte offset where the Nonce field is encoded.
+func (h *MingingRightBlock) SerializeForNonceSearch(buf []byte) ([]byte, int) {
+	return appendMinerBlockHashBytes(buf[:0], h), MingingRightBlockNonceOffset
+}
+
+// PatchMingingRightBlockNonce overwrites the encoded nonce in serialized miner
+// header hash bytes using the same little-endian format as Serialize.
+func PatchMingingRightBlockNonce(serialized []byte, nonceOffset int, nonce int32) error {
+	if nonceOffset < 0 || nonceOffset+4 > len(serialized) {
+		return io.ErrShortBuffer
+	}
+	common.LittleEndian.PutUint32(serialized[nonceOffset:nonceOffset+4], uint32(nonce))
+	return nil
 }
 
 // OmcDecode decodes r using the bitcoin protocol encoding into the receiver.
