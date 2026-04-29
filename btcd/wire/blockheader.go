@@ -247,14 +247,9 @@ const minerBlockLen = 180 // max len. if IPv6 address & port
 
 // BlockHash computes the block identifier hash for the given block header.
 func (h *BlockHeader) BlockHash() chainhash.Hash {
-	// Encode the header and double sha256 everything prior to the number of
-	// transactions.  Ignore the error returns since there is no way the
-	// encode could fail except being out of memory which would cause a
-	// run-time panic.
-	buf := bytes.NewBuffer(make([]byte, 0, MaxBlockHeaderPayload))
-	_ = writeBlockHeader(buf, 0, h)
-
-	return chainhash.DoubleHashH(buf.Bytes())
+	var buf [MaxBlockHeaderPayload]byte
+	serialized := appendBlockHeaderHashBytes(buf[:0], h)
+	return chainhash.DoubleHashH(serialized)
 }
 
 // OmcDecode decodes r using the bitcoin protocol encoding into the receiver.
@@ -328,16 +323,20 @@ func writeBlockHeader(w io.Writer, pver uint32, bh *BlockHeader) error {
 		sec, bh.ContractExec, bh.Nonce)
 }
 
+func appendBlockHeaderHashBytes(buf []byte, bh *BlockHeader) []byte {
+	buf = appendUint32LE(buf, bh.Version)
+	buf = append(buf, bh.PrevBlock[:]...)
+	buf = append(buf, bh.MerkleRoot[:]...)
+	buf = appendUint32LE(buf, uint32(bh.Timestamp.Unix()))
+	buf = appendUint32LE(buf, bh.ContractExec)
+	return appendUint32LE(buf, uint32(bh.Nonce))
+}
+
 // BlockHash computes the block identifier hash for the given block header.
 func (h *MingingRightBlock) BlockHash() chainhash.Hash {
-	// Encode the header and double sha256 everything prior to the number of
-	// transactions.  Ignore the error returns since there is no way the
-	// encode could fail except being out of memory which would cause a
-	// run-time panic.
-	buf := bytes.NewBuffer(make([]byte, 0, minerBlockLen))
-	_ = writeMinerBlock(buf, 0, h)
-
-	return chainhash.DoubleHashH(buf.Bytes())
+	var buf [MaxMinerBlockHeaderPayload]byte
+	serialized := appendMinerBlockHashBytes(buf[:0], h)
+	return chainhash.DoubleHashH(serialized)
 }
 
 // OmcDecode decodes r using the bitcoin protocol encoding into the receiver.
@@ -552,6 +551,114 @@ func writeMinerBlock(w io.Writer, pver uint32, bh *MingingRightBlock) error {
 	}
 
 	return nil
+}
+
+func appendMinerBlockHashBytes(buf []byte, bh *MingingRightBlock) []byte {
+	buf = appendUint32LE(buf, bh.Version)
+	buf = append(buf, bh.PrevBlock[:]...)
+	buf = append(buf, bh.BestBlock[:]...)
+	buf = appendUint32LE(buf, uint32(bh.Timestamp.Unix()))
+	buf = appendUint32LE(buf, bh.Bits)
+	buf = appendUint32LE(buf, uint32(bh.Nonce))
+
+	buf = appendVarBytes(buf, bh.Miner[:])
+	buf = appendVarBytes(buf, bh.Connection)
+
+	if bh.Utxos == nil {
+		buf = appendVarInt(buf, 0)
+	} else {
+		buf = appendVarInt(buf, 1)
+		buf = appendOutPointHashBytes(buf, bh.Utxos)
+	}
+
+	buf = appendVarInt(buf, uint64(len(bh.ViolationReport)))
+	for _, violation := range bh.ViolationReport {
+		buf = appendViolationHashBytes(buf, violation)
+	}
+
+	buf = appendVarInt(buf, uint64(bh.Collateral))
+	buf = appendVarInt(buf, uint64(bh.MeanTPH))
+
+	buf = appendVarInt(buf, uint64(len(bh.TphReports)))
+	for _, report := range bh.TphReports {
+		buf = appendVarInt(buf, uint64(report))
+	}
+
+	buf = appendUint32LE(buf, bh.ContractLimit)
+
+	buf = appendVarInt(buf, uint64(len(bh.Instructions)))
+	for _, inst := range bh.Instructions {
+		buf = appendInstructionHashBytes(buf, inst)
+	}
+
+	return buf
+}
+
+func appendViolationHashBytes(buf []byte, violation *Violations) []byte {
+	if violation.Height == 0 {
+		return buf
+	}
+
+	buf = appendUint32LE(buf, uint32(violation.Height))
+	buf = append(buf, violation.MRBlock[:]...)
+	buf = appendVarInt(buf, uint64(len(violation.Blocks)))
+	for i := range violation.Blocks {
+		buf = append(buf, violation.Blocks[i][:]...)
+	}
+
+	return buf
+}
+
+func appendInstructionHashBytes(buf []byte, inst *Instruction) []byte {
+	buf = append(buf, byte(inst.InstCode))
+	return appendVarBytes(buf, inst.InstData)
+}
+
+func appendOutPointHashBytes(buf []byte, op *OutPoint) []byte {
+	buf = append(buf, op.Hash[:]...)
+	return appendUint32LE(buf, op.Index)
+}
+
+func appendVarBytes(buf []byte, bytes []byte) []byte {
+	buf = appendVarInt(buf, uint64(len(bytes)))
+	return append(buf, bytes...)
+}
+
+func appendVarInt(buf []byte, val uint64) []byte {
+	if val < 0xfd {
+		return append(buf, byte(val))
+	}
+	if val <= 0xffff {
+		buf = append(buf, 0xfd)
+		return appendUint16LE(buf, uint16(val))
+	}
+	if val <= 0xffffffff {
+		buf = append(buf, 0xfe)
+		return appendUint32LE(buf, uint32(val))
+	}
+	buf = append(buf, 0xff)
+	return appendUint64LE(buf, val)
+}
+
+func appendUint16LE(buf []byte, val uint16) []byte {
+	n := len(buf)
+	buf = append(buf, 0, 0)
+	common.LittleEndian.PutUint16(buf[n:], val)
+	return buf
+}
+
+func appendUint32LE(buf []byte, val uint32) []byte {
+	n := len(buf)
+	buf = append(buf, 0, 0, 0, 0)
+	common.LittleEndian.PutUint32(buf[n:], val)
+	return buf
+}
+
+func appendUint64LE(buf []byte, val uint64) []byte {
+	n := len(buf)
+	buf = append(buf, 0, 0, 0, 0, 0, 0, 0, 0)
+	common.LittleEndian.PutUint64(buf[n:], val)
+	return buf
 }
 
 type MinerBlock struct { // equivalent of btcutil.Block

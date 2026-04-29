@@ -31,6 +31,23 @@ type namedMinerBlockHeader struct {
 	header *MingingRightBlock
 }
 
+func TestBlockHeaderBlockHashMatchesSerialization(t *testing.T) {
+	header := blockHashBenchmarkHeader()
+	for _, nonce := range []int32{0, 1, 0x7fffffff, -1} {
+		header.Nonce = nonce
+
+		var serialized bytes.Buffer
+		if err := header.Serialize(&serialized); err != nil {
+			t.Fatalf("serialize header nonce %d: %v", nonce, err)
+		}
+
+		wantHash := chainhash.DoubleHashH(serialized.Bytes())
+		if gotHash := header.BlockHash(); gotHash != wantHash {
+			t.Fatalf("nonce %d: BlockHash = %x, want %x", nonce, gotHash, wantHash)
+		}
+	}
+}
+
 func TestMingingRightBlockHashSerializationGolden(t *testing.T) {
 	if *updateBlockHashGolden {
 		writeBlockHashGolden(t, buildBlockHashGoldenFixtures(t))
@@ -83,6 +100,34 @@ func TestMingingRightBlockHashSerializationGolden(t *testing.T) {
 	}
 }
 
+func TestMingingRightBlockHashMatchesSerializationEdgeCases(t *testing.T) {
+	header := minerBlockHashBenchmarkHeader(4, true, true, true)
+	header.Collateral = 0xffffffff
+	header.MeanTPH = 0x10000
+	header.TphReports = []uint32{0xfc, 0xfd, 0xffff, 0x10000, 0xffffffff}
+
+	var mrBlock chainhash.Hash
+	fillBenchmarkHash(&mrBlock, 0xe0)
+	header.ViolationReport = []*Violations{{
+		Height:  0x7fffffff,
+		MRBlock: mrBlock,
+		Blocks:  make([]chainhash.Hash, 253),
+	}}
+	for i := range header.ViolationReport[0].Blocks {
+		fillBenchmarkHash(&header.ViolationReport[0].Blocks[i], byte(i))
+	}
+
+	header.Instructions = make([]*Instruction, 253)
+	for i := range header.Instructions {
+		header.Instructions[i] = &Instruction{
+			InstCode: InstructionCode(1 + byte(i%2)),
+			InstData: []byte{byte(i), byte(i >> 8)},
+		}
+	}
+
+	assertMinerBlockHashMatchesSerialization(t, "varint-boundary-large-header", header)
+}
+
 func BenchmarkBlockHeaderBlockHash(b *testing.B) {
 	header := blockHashBenchmarkHeader()
 	b.ReportAllocs()
@@ -104,6 +149,19 @@ func BenchmarkMingingRightBlockBlockHash(b *testing.B) {
 			}
 			b.ReportMetric(float64(b.N)/b.Elapsed().Seconds(), "H/s")
 		})
+	}
+}
+
+func assertMinerBlockHashMatchesSerialization(t *testing.T, name string, header *MingingRightBlock) {
+	t.Helper()
+
+	var serialized bytes.Buffer
+	if err := header.Serialize(&serialized); err != nil {
+		t.Fatalf("%s: serialize header: %v", name, err)
+	}
+	wantHash := chainhash.DoubleHashH(serialized.Bytes())
+	if gotHash := header.BlockHash(); gotHash != wantHash {
+		t.Fatalf("%s: BlockHash = %x, want %x", name, gotHash, wantHash)
 	}
 }
 
