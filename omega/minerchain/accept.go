@@ -213,8 +213,12 @@ func (m *MinerChain) checkProofOfWork(header *wire.MingingRightBlock, powLimit *
 			return err
 		}
 
-		parentHeader := parentNode.Data.(*blockchainNodeData).block
-		c, err := EffectiveH1Collateral(header, parentHeader, parentNode.Height+1, m.chainParams)
+		// PR-12: must be the only acceptH1Bindings call in checkProofOfWork.
+		bindings, err := acceptH1Bindings(header, parentNode, m.chainParams)
+		if err != nil {
+			return ruleError(ErrUnexpectedDifficulty, err.Error())
+		}
+		c, err := bindings.Resolve()
 		if err != nil {
 			return ruleError(ErrUnexpectedDifficulty, err.Error())
 		}

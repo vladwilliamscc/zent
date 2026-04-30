@@ -748,7 +748,14 @@ out:
 			continue
 		}
 
-		c, err := EffectiveH1Collateral(block.MsgBlock(), &parentHeader, template.Height, m.cfg.ChainParams)
+		// PR-12: must be the only solverH1Bindings call in generateBlocks.
+		bindings, err := solverH1Bindings(template, chainChoice, m.cfg.ChainParams)
+		if err != nil {
+			log.Infof("solver h1 bindings unavailable: %v", err)
+			time.Sleep(time.Second * 5)
+			continue
+		}
+		c, err := bindings.Resolve()
 		if err != nil {
 			log.Infof("h1_schedule helper error, abort template: %v", err)
 			time.Sleep(time.Second * 5)

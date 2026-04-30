@@ -3,9 +3,71 @@ package minerchain
 import (
 	"fmt"
 
+	"btcd/blockchain/chainutil"
 	"btcd/chaincfg"
+	"btcd/mining"
 	"btcd/wire"
 )
+
+type effectiveH1Bindings struct {
+	Header       *wire.MingingRightBlock
+	ParentHeader *wire.MingingRightBlock
+	Height       int32
+	Params       *chaincfg.Params
+}
+
+func (b effectiveH1Bindings) Resolve() (uint32, error) {
+	return EffectiveH1Collateral(b.Header, b.ParentHeader, b.Height, b.Params)
+}
+
+func acceptH1Bindings(
+	header *wire.MingingRightBlock,
+	parentNode *chainutil.BlockNode,
+	params *chaincfg.Params,
+) (effectiveH1Bindings, error) {
+	var zero effectiveH1Bindings
+	if parentNode == nil {
+		return zero, fmt.Errorf("acceptH1Bindings: nil parent node")
+	}
+	data, ok := parentNode.Data.(*blockchainNodeData)
+	if !ok || data == nil || data.block == nil {
+		return zero, fmt.Errorf("acceptH1Bindings: parent node has unexpected data shape")
+	}
+	return effectiveH1Bindings{
+		Header:       header,
+		ParentHeader: data.block,
+		Height:       parentNode.Height + 1,
+		Params:       params,
+	}, nil
+}
+
+func solverH1Bindings(
+	template *mining.BlockTemplate,
+	chainChoice *chainutil.BlockNode,
+	params *chaincfg.Params,
+) (effectiveH1Bindings, error) {
+	var zero effectiveH1Bindings
+	if template == nil {
+		return zero, fmt.Errorf("solverH1Bindings: nil template")
+	}
+	header, ok := template.Block.(*wire.MingingRightBlock)
+	if !ok || header == nil {
+		return zero, fmt.Errorf("solverH1Bindings: template.Block is not *wire.MingingRightBlock")
+	}
+	if chainChoice == nil {
+		return zero, fmt.Errorf("solverH1Bindings: nil chainChoice")
+	}
+	data, ok := chainChoice.Data.(*blockchainNodeData)
+	if !ok || data == nil || data.block == nil {
+		return zero, fmt.Errorf("solverH1Bindings: chainChoice has unexpected data shape")
+	}
+	return effectiveH1Bindings{
+		Header:       header,
+		ParentHeader: data.block,
+		Height:       template.Height,
+		Params:       params,
+	}, nil
+}
 
 func h1DenominatorScheduleActive(height int32, params *chaincfg.Params) bool {
 	if params == nil {
