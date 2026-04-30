@@ -18,6 +18,7 @@ import (
 	"github.com/omegasuite/btcd/btcec"
 	"github.com/omegasuite/btcd/chaincfg/chainhash"
 	"net"
+	"omega/runtimemetrics"
 	"omega/token"
 	"sync"
 	"time"
@@ -106,6 +107,13 @@ type Syncer struct {
 	//	repeats   int
 
 	nmsg [7]int
+}
+
+func (self *Syncer) commitSignature(target int32) {
+	if self.sigGiven == -1 && target != -1 {
+		runtimemetrics.IncCommitteeParticipationSuccess()
+	}
+	self.sigGiven = target
 }
 
 func (self *Syncer) CommitteeMsgMG(p [20]byte, m wire.OmegaMessage) {
@@ -268,10 +276,15 @@ func (self *Syncer) repeater() {
 		// check if we should agree with someone else
 		best := self.best()
 
-		if best >= 0 && best != self.Myself && self.asked[best] != nil && self.knowledges.Qualified(best) && miner.server.Connected(self.Names[best]) {
-			self.agreed = best
-			self.commands <- self.asked[best]
-			self.asked[best] = nil
+		qualified := best >= 0 && best != self.Myself && self.asked[best] != nil && self.knowledges.Qualified(best)
+		if qualified {
+			if miner.server.Connected(self.Names[best]) {
+				self.agreed = best
+				self.commands <- self.asked[best]
+				self.asked[best] = nil
+			} else {
+				runtimemetrics.IncCommitteeDialFailure()
+			}
 		}
 	}
 
@@ -830,7 +843,7 @@ func (self *Syncer) Signature(msg *wire.MsgSignature) bool {
 		return false
 	}
 
-	self.sigGiven = tree
+	self.commitSignature(tree)
 
 	self.forest[owner].block.MsgBlock().Transactions[0].SignatureScripts = append(
 		self.forest[owner].block.MsgBlock().Transactions[0].SignatureScripts,
@@ -892,7 +905,7 @@ func (self *Syncer) Consensus(msg *wire.MsgConsensus) bool {
 		if !UpdateLastWritten(self.Height) && self.sigGiven != self.agreed { // nenver sign if height is not higher than last signed block
 			return false
 		}
-		self.sigGiven = self.agreed
+		self.commitSignature(self.agreed)
 		if self.forest[msg.From].block != nil {
 			// remove the sig 1 that contained the miner's name
 			self.forest[msg.From].block.MsgBlock().Transactions[0].SignatureScripts =
@@ -971,7 +984,7 @@ func (self *Syncer) ckconsensus(bc bool) bool {
 		if !UpdateLastWritten(self.Height) && self.sigGiven != self.Myself { // nenver sign if height is not higher than last signed block
 			return false
 		}
-		self.sigGiven = self.Myself
+		self.commitSignature(self.Myself)
 
 		sig, _ := privKey.Sign(hash)
 		ss := sig.Serialize()

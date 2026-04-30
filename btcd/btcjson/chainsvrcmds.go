@@ -357,11 +357,17 @@ type AddCollateralCmd struct {
 	Index uint32
 }
 
+type GetMinerRuntimeMetricsCmd struct{}
+
 func NewAddMiningKeyCmd(k string, ktype bool) *AddMiningKeyCmd {
 	return &AddMiningKeyCmd{
 		KeyType: ktype,
 		Key:     k,
 	}
+}
+
+func NewGetMinerRuntimeMetricsCmd() *GetMinerRuntimeMetricsCmd {
+	return &GetMinerRuntimeMetricsCmd{}
 }
 
 type GetMinerBlockHeightCmd struct {
@@ -1274,6 +1280,7 @@ func init() {
 	MustRegisterCmd("gbi", (*GetBlockChainInfoCmd)(nil), flags)
 	MustRegisterCmd("addminingkey", (*AddMiningKeyCmd)(nil), flags)
 	MustRegisterCmd("addcollateral", (*AddCollateralCmd)(nil), flags)
+	MustRegisterCmd("getminerruntimemetrics", (*GetMinerRuntimeMetricsCmd)(nil), flags)
 	MustRegisterCmd("getblockcount", (*GetBlockCountCmd)(nil), flags)
 	MustRegisterCmd("gbc", (*GetBlockCountCmd)(nil), flags)
 	MustRegisterCmd("getminerblockcount", (*GetMinerBlockCountCmd)(nil), flags)

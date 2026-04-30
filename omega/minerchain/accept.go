@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"github.com/omegasuite/btcd/chaincfg/chainhash"
 	"omega/chainmap"
+	"omega/runtimemetrics"
 	"sort"
 
 	//	"github.com/omegasuite/btcutil/base58"
@@ -393,11 +394,13 @@ func (b *MinerChain) checkBlockContext(block *wire.MinerBlock, prevNode *chainut
 		if len(block.MsgBlock().Connection) > 0 && len(h.Connection) > 0 && bytes.Compare(h.Connection, block.MsgBlock().Connection) == 0 {
 			str := "Miner's IP/port has appeared in the past %d blocks"
 			str = fmt.Sprintf(str, wire.MinerGap)
+			runtimemetrics.IncIPMinerGapReject()
 			return ruleError(ErrRotationViolation, str)
 		}
 		if bytes.Compare(h.Miner[:], block.MsgBlock().Miner[:]) == 0 {
 			str := "Miner has appeared in the past %d blocks"
 			str = fmt.Sprintf(str, wire.MinerGap)
+			runtimemetrics.IncAddrMinerGapReject()
 			return ruleError(ErrRotationViolation, str)
 		}
 		p = p.Parent

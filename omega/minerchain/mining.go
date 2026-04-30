@@ -22,6 +22,7 @@ import (
 	"btcutil"
 	"math/big"
 	"math/rand"
+	"omega/runtimemetrics"
 	"sort"
 
 	//	"runtime"
@@ -280,6 +281,11 @@ func (m *CPUMiner) solveBlock(header *mining.BlockTemplate, blockHeight int32, h
 		var serializedScratch [wire.MaxMinerBlockHeaderPayload]byte
 		serializedHeader, nonceOffset := locheader.SerializeForNonceSearch(serializedScratch[:0])
 		hashesCompleted := uint64(0)
+		nonceTrials := uint64(0)
+		flushNonceTrials := func() {
+			runtimemetrics.IncMinerNonceTrials(nonceTrials)
+			nonceTrials = 0
+		}
 
 		ticker := time.NewTicker(time.Second * 5)
 		defer ticker.Stop()
@@ -293,19 +299,23 @@ func (m *CPUMiner) solveBlock(header *mining.BlockTemplate, blockHeight int32, h
 				if j%10000 == 0 { // normal mode
 					select {
 					case <-locquit:
+						flushNonceTrials()
 						return
 
 					case <-quit:
+						flushNonceTrials()
 						resch <- nil
 						return
 
 					case <-ticker.C:
 						m.updateHashes <- hashesCompleted
 						hashesCompleted = 0
+						flushNonceTrials()
 
 						tbest = m.g.Chain.BestSnapshot()
 						if rotation != tbest.LastRotation {
 							log.Infof("quit solving block because a rotation occurred in TX chain")
+							flushNonceTrials()
 							resch <- nil
 							return
 						}
@@ -314,6 +324,7 @@ func (m *CPUMiner) solveBlock(header *mining.BlockTemplate, blockHeight int32, h
 						best := m.g.Chain.Miners.BestSnapshot()
 						if !locheader.PrevBlock.IsEqual(&best.Hash) {
 							log.Infof("quit solving block because tip changed")
+							flushNonceTrials()
 							resch <- nil
 							return
 						}
@@ -333,11 +344,13 @@ func (m *CPUMiner) solveBlock(header *mining.BlockTemplate, blockHeight int32, h
 				locheader.Nonce = int32(i)
 				if err := wire.PatchMingingRightBlockNonce(serializedHeader, nonceOffset, locheader.Nonce); err != nil {
 					log.Infof("miner nonce patch failed: %v", err)
+					flushNonceTrials()
 					resch <- nil
 					return
 				}
 				hash := chainhash.DoubleHashH(serializedHeader)
 				hashesCompleted += 2
+				nonceTrials++
 
 				// The block is solved when the new block hash is less
 				// than the target difficulty.  Yay!
@@ -353,10 +366,12 @@ func (m *CPUMiner) solveBlock(header *mining.BlockTemplate, blockHeight int32, h
 					best := m.g.Chain.Miners.BestSnapshot()
 					if !locheader.PrevBlock.IsEqual(&best.Hash) {
 						log.Infof("quit solving block because tip changed")
+						flushNonceTrials()
 						resch <- nil
 						return
 					}
 					log.Infof("miner block solved")
+					flushNonceTrials()
 					resch <- &locheader
 					return
 				}
@@ -733,6 +748,7 @@ out:
 		}
 
 		if err != nil || template == nil {
+			runtimemetrics.IncTemplateBuildFailure()
 			m.submitBlockLock.Unlock()
 			m.Stale = true
 			log.Infof("miner.generateBlocks: sleep on err != nil || template == nil, curHeight = %d", curHeight)
@@ -741,6 +757,7 @@ out:
 		}
 
 		m.Stale = false
+		runtimemetrics.IncTemplateBuildSuccess()
 
 		// Attempt to solve the block.  The function will exit early
 		// with false when conditions that trigger a stale block, so
