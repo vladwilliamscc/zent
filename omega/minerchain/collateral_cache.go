@@ -1,11 +1,13 @@
 package minerchain
 
 import (
+	"errors"
 	"fmt"
 	"sync"
 	"time"
 
 	"btcd/blockchain"
+	"btcd/blockchain/chainutil"
 	"btcd/database"
 	"btcd/mining"
 	"btcd/wire"
@@ -19,6 +21,29 @@ const (
 	collateralOwnerScriptLen = 21
 	collateralHaoPerCoin     = int64(1e8)
 )
+
+var (
+	errSafeNodeNilNode   = errors.New("safeNodeHeader: nil node")
+	errSafeNodeNilData   = errors.New("safeNodeHeader: nil node data")
+	errSafeNodeWrongType = errors.New("safeNodeHeader: unexpected node data type")
+)
+
+func safeNodeHeader(node *chainutil.BlockNode) (*wire.MingingRightBlock, error) {
+	if node == nil {
+		return nil, errSafeNodeNilNode
+	}
+	if node.Data == nil {
+		return nil, errSafeNodeNilData
+	}
+	data, ok := node.Data.(*blockchainNodeData)
+	if !ok {
+		return nil, errSafeNodeWrongType
+	}
+	if data == nil || data.block == nil {
+		return nil, errSafeNodeNilData
+	}
+	return data.block, nil
+}
 
 // CollateralState describes the cache-side validity state for one collateral
 // outpoint.  It is deliberately separate from consensus validation; PR-3 keeps
@@ -80,12 +105,17 @@ type CollateralStartupAudit struct {
 }
 
 type CollateralCacheStats struct {
-	StateCounts                map[CollateralState]int
-	InvalidationTotal          map[string]uint64
-	ExternalSpendDetectedTotal uint64
-	MRReuseDetectedTotal       uint64
-	ReorgInvalidationsTotal    map[string]uint64
-	StartupLoadAuditTotal      CollateralStartupAudit
+	StateCounts                  map[CollateralState]int
+	InvalidationTotal            map[string]uint64
+	ExternalSpendDetectedTotal   uint64
+	MRReuseDetectedTotal         uint64
+	ReorgInvalidationsTotal      map[string]uint64
+	StartupLoadAuditTotal        CollateralStartupAudit
+	CacheUnavailableTotal        uint64
+	CacheUnavailableByReason     map[string]uint64
+	ChainContextUnavailableTotal map[string]uint64
+	SelectorNoEligibleTotal      map[string]uint64
+	StartupCacheReady            bool
 }
 
 type collateralCacheBackend struct {
@@ -151,8 +181,11 @@ func newCollateralCacheWithExpectedOwners(backend collateralCacheBackend, owners
 		expectedOwners: expectedOwners,
 		backend:        backend,
 		stats: CollateralCacheStats{
-			InvalidationTotal:       make(map[string]uint64),
-			ReorgInvalidationsTotal: make(map[string]uint64),
+			InvalidationTotal:            make(map[string]uint64),
+			ReorgInvalidationsTotal:      make(map[string]uint64),
+			CacheUnavailableByReason:     make(map[string]uint64),
+			ChainContextUnavailableTotal: make(map[string]uint64),
+			SelectorNoEligibleTotal:      make(map[string]uint64),
 		},
 	}
 }
@@ -403,12 +436,15 @@ func (c *CollateralCache) Entry(op wire.OutPoint) (CollateralEntry, bool) {
 
 func (c *CollateralCache) Stats() CollateralCacheStats {
 	stats := CollateralCacheStats{
-		StateCounts:                make(map[CollateralState]int),
-		InvalidationTotal:          make(map[string]uint64),
-		ExternalSpendDetectedTotal: 0,
-		MRReuseDetectedTotal:       0,
-		ReorgInvalidationsTotal:    make(map[string]uint64),
-		StartupLoadAuditTotal:      CollateralStartupAudit{},
+		StateCounts:                  make(map[CollateralState]int),
+		InvalidationTotal:            make(map[string]uint64),
+		ExternalSpendDetectedTotal:   0,
+		MRReuseDetectedTotal:         0,
+		ReorgInvalidationsTotal:      make(map[string]uint64),
+		StartupLoadAuditTotal:        CollateralStartupAudit{},
+		CacheUnavailableByReason:     make(map[string]uint64),
+		ChainContextUnavailableTotal: make(map[string]uint64),
+		SelectorNoEligibleTotal:      make(map[string]uint64),
 	}
 	if c == nil {
 		return stats
@@ -424,12 +460,32 @@ func (c *CollateralCache) Stats() CollateralCacheStats {
 	for chain, count := range c.stats.ReorgInvalidationsTotal {
 		stats.ReorgInvalidationsTotal[chain] = count
 	}
+	for reason, count := range c.stats.CacheUnavailableByReason {
+		stats.CacheUnavailableByReason[reason] = count
+	}
+	for key, count := range c.stats.ChainContextUnavailableTotal {
+		stats.ChainContextUnavailableTotal[key] = count
+	}
+	for reason, count := range c.stats.SelectorNoEligibleTotal {
+		stats.SelectorNoEligibleTotal[reason] = count
+	}
 	stats.ExternalSpendDetectedTotal = c.stats.ExternalSpendDetectedTotal
 	stats.MRReuseDetectedTotal = c.stats.MRReuseDetectedTotal
 	stats.StartupLoadAuditTotal = c.stats.StartupLoadAuditTotal
+	stats.CacheUnavailableTotal = c.stats.CacheUnavailableTotal
+	stats.StartupCacheReady = c.stats.StartupCacheReady
 	c.mu.RUnlock()
 
 	return stats
+}
+
+func (c *CollateralCache) SetStartupReady(ready bool) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	c.stats.StartupCacheReady = ready
+	c.mu.Unlock()
 }
 
 func (c *CollateralCache) LoadFromCollateralMap(collateral map[[20]byte][]*wire.OutPoint) CollateralStartupAudit {
@@ -601,6 +657,201 @@ func (c *CollateralCache) recordExternalSpend() {
 	c.mu.Lock()
 	c.stats.ExternalSpendDetectedTotal++
 	c.mu.Unlock()
+}
+
+func (m *CPUMiner) recordCacheUnavailable(reason string) {
+	m.updateCollateralStats(func(stats *CollateralCacheStats) {
+		ensureCollateralStatsMaps(stats)
+		stats.CacheUnavailableTotal++
+		stats.CacheUnavailableByReason[reason]++
+	})
+}
+
+func (m *CPUMiner) recordChainContextUnavailable(site string, err error) {
+	reason := chainContextReason(err)
+	m.updateCollateralStats(func(stats *CollateralCacheStats) {
+		ensureCollateralStatsMaps(stats)
+		stats.ChainContextUnavailableTotal[site+"|"+reason]++
+	})
+}
+
+func (m *CPUMiner) recordSelectorNoEligible(reason string) {
+	m.updateCollateralStats(func(stats *CollateralCacheStats) {
+		ensureCollateralStatsMaps(stats)
+		stats.SelectorNoEligibleTotal[reason]++
+	})
+}
+
+func (m *CPUMiner) recordStartupReady() {
+	if m == nil {
+		return
+	}
+	cache := m.currentCollateralCache()
+	if cache == nil {
+		m.recordCacheUnavailable("nil_at_startup")
+		log.Errorf("collateral cache startup readiness: cache=nil")
+		return
+	}
+
+	eligibleCount := 0
+	for _, entry := range cache.Snapshot() {
+		if entry.State == StateEligible {
+			eligibleCount++
+		}
+	}
+	snap := cache.Stats()
+	log.Infof("collateral cache startup readiness: cache=non-nil eligible=%d audit=%+v",
+		eligibleCount, snap.StartupLoadAuditTotal)
+	cache.SetStartupReady(true)
+}
+
+func (m *CPUMiner) updateCollateralStats(update func(*CollateralCacheStats)) {
+	if m == nil || update == nil {
+		return
+	}
+	cache := m.currentCollateralCache()
+	if cache != nil {
+		cache.mu.Lock()
+		ensureCollateralStatsMaps(&cache.stats)
+		update(&cache.stats)
+		cache.mu.Unlock()
+		return
+	}
+
+	m.collateralStatsMu.Lock()
+	ensureCollateralStatsMaps(&m.collateralStats)
+	update(&m.collateralStats)
+	m.collateralStatsMu.Unlock()
+}
+
+func (m *CPUMiner) currentCollateralCache() *CollateralCache {
+	if m == nil {
+		return nil
+	}
+	m.collateralCacheMu.Lock()
+	cache := m.collateralCache
+	m.collateralCacheMu.Unlock()
+	return cache
+}
+
+func (m *CPUMiner) fallbackCollateralStats() CollateralCacheStats {
+	stats := CollateralCacheStats{
+		StateCounts:                  make(map[CollateralState]int),
+		InvalidationTotal:            make(map[string]uint64),
+		ReorgInvalidationsTotal:      make(map[string]uint64),
+		CacheUnavailableByReason:     make(map[string]uint64),
+		ChainContextUnavailableTotal: make(map[string]uint64),
+		SelectorNoEligibleTotal:      make(map[string]uint64),
+	}
+	if m == nil {
+		return stats
+	}
+
+	m.collateralStatsMu.Lock()
+	defer m.collateralStatsMu.Unlock()
+	copyCollateralStats(&stats, m.collateralStats)
+	return stats
+}
+
+func ensureCollateralStatsMaps(stats *CollateralCacheStats) {
+	if stats.StateCounts == nil {
+		stats.StateCounts = make(map[CollateralState]int)
+	}
+	if stats.InvalidationTotal == nil {
+		stats.InvalidationTotal = make(map[string]uint64)
+	}
+	if stats.ReorgInvalidationsTotal == nil {
+		stats.ReorgInvalidationsTotal = make(map[string]uint64)
+	}
+	if stats.CacheUnavailableByReason == nil {
+		stats.CacheUnavailableByReason = make(map[string]uint64)
+	}
+	if stats.ChainContextUnavailableTotal == nil {
+		stats.ChainContextUnavailableTotal = make(map[string]uint64)
+	}
+	if stats.SelectorNoEligibleTotal == nil {
+		stats.SelectorNoEligibleTotal = make(map[string]uint64)
+	}
+}
+
+func copyCollateralStats(dst *CollateralCacheStats, src CollateralCacheStats) {
+	dst.ExternalSpendDetectedTotal = src.ExternalSpendDetectedTotal
+	dst.MRReuseDetectedTotal = src.MRReuseDetectedTotal
+	dst.StartupLoadAuditTotal = src.StartupLoadAuditTotal
+	dst.CacheUnavailableTotal = src.CacheUnavailableTotal
+	dst.StartupCacheReady = src.StartupCacheReady
+	for state, count := range src.StateCounts {
+		dst.StateCounts[state] = count
+	}
+	for key, count := range src.InvalidationTotal {
+		dst.InvalidationTotal[key] = count
+	}
+	for key, count := range src.ReorgInvalidationsTotal {
+		dst.ReorgInvalidationsTotal[key] = count
+	}
+	for key, count := range src.CacheUnavailableByReason {
+		dst.CacheUnavailableByReason[key] = count
+	}
+	for key, count := range src.ChainContextUnavailableTotal {
+		dst.ChainContextUnavailableTotal[key] = count
+	}
+	for key, count := range src.SelectorNoEligibleTotal {
+		dst.SelectorNoEligibleTotal[key] = count
+	}
+}
+
+func chainContextReason(err error) string {
+	switch {
+	case errors.Is(err, errSafeNodeNilNode):
+		return "nil_node"
+	case errors.Is(err, errSafeNodeNilData):
+		return "nil_data"
+	case errors.Is(err, errSafeNodeWrongType):
+		return "wrong_type"
+	default:
+		return "unknown"
+	}
+}
+
+func deriveNoEligibleReason(cache *CollateralCache, owner [20]byte, requiredAmount int64, excluded map[wire.OutPoint]struct{}) string {
+	snapshot := cache.Snapshot()
+	if len(snapshot) == 0 {
+		return "cache_empty"
+	}
+
+	reasons := make(map[string]struct{})
+	for op, entry := range snapshot {
+		reason := selectorEntryNoEligibleReason(op, entry, owner, requiredAmount, excluded)
+		reasons[reason] = struct{}{}
+	}
+	if len(reasons) == 1 {
+		for reason := range reasons {
+			return reason
+		}
+	}
+	return "mixed"
+}
+
+func selectorEntryNoEligibleReason(op wire.OutPoint, entry CollateralEntry, owner [20]byte, requiredAmount int64, excluded map[wire.OutPoint]struct{}) string {
+	if entry.State == StateSpent || entry.State == StateNotFound || entry.State == StateStale {
+		return "spent"
+	}
+	if entry.State == StateOwnerMismatch || entry.OwnerHash != owner {
+		return "owner"
+	}
+	if entry.State == StateTokenMismatch || entry.TokenType != common.FeeCoinTyp {
+		return "token"
+	}
+	if entry.State == StateAmountInsufficient || entry.Amount < requiredAmount {
+		return "amount"
+	}
+	if entry.State == StateEligible {
+		if _, ok := excluded[op]; ok {
+			return "recent_window"
+		}
+		return "mixed"
+	}
+	return "mixed"
 }
 
 func (m *CPUMiner) ensureCollateralCache() *CollateralCache {

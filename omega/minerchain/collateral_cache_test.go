@@ -1,6 +1,7 @@
 package minerchain
 
 import (
+	"errors"
 	"os"
 	"strings"
 	"sync"
@@ -8,6 +9,7 @@ import (
 	"time"
 
 	"btcd/blockchain"
+	"btcd/blockchain/chainutil"
 	"btcd/mining"
 	"btcd/wire"
 	"btcd/wire/common"
@@ -457,6 +459,189 @@ func TestCollateralSelectorCheckCollateralFailureRefreshPath(t *testing.T) {
 	}
 }
 
+func TestSafeNodeHeaderNilNodeReturnsError(t *testing.T) {
+	header, err := safeNodeHeader(nil)
+	if !errors.Is(err, errSafeNodeNilNode) {
+		t.Fatalf("safeNodeHeader nil node error = %v, want %v", err, errSafeNodeNilNode)
+	}
+	if header != nil {
+		t.Fatalf("safeNodeHeader nil node returned header: %v", header)
+	}
+}
+
+func TestSafeNodeHeaderNilDataReturnsError(t *testing.T) {
+	header, err := safeNodeHeader(&chainutil.BlockNode{})
+	if !errors.Is(err, errSafeNodeNilData) {
+		t.Fatalf("safeNodeHeader nil data error = %v, want %v", err, errSafeNodeNilData)
+	}
+	if header != nil {
+		t.Fatalf("safeNodeHeader nil data returned header: %v", header)
+	}
+}
+
+func TestSafeNodeHeaderWrongTypeReturnsError(t *testing.T) {
+	header, err := safeNodeHeader(&chainutil.BlockNode{Data: wrongCollateralNodeData{}})
+	if !errors.Is(err, errSafeNodeWrongType) {
+		t.Fatalf("safeNodeHeader wrong type error = %v, want %v", err, errSafeNodeWrongType)
+	}
+	if header != nil {
+		t.Fatalf("safeNodeHeader wrong type returned header: %v", header)
+	}
+}
+
+func TestSafeNodeHeaderValidNodeReturnsHeader(t *testing.T) {
+	want := testCollateralMinerHeader(100)
+	got, err := safeNodeHeader(&chainutil.BlockNode{Data: &blockchainNodeData{block: want}})
+	if err != nil {
+		t.Fatalf("safeNodeHeader valid node returned error: %v", err)
+	}
+	if got != want {
+		t.Fatalf("safeNodeHeader returned %p, want %p", got, want)
+	}
+}
+
+func TestCollateralCacheNonNilEmpty(t *testing.T) {
+	// An initialized-but-empty cache is a no-candidate result, not selector
+	// infrastructure failure.  Licensed/unlicensed mining behavior remains
+	// governed by the existing uc == nil branch in generateBlocks.
+	owner := testOwner(31)
+	cache := newCollateralCacheWithExpectedOwners(collateralCacheBackend{}, owner)
+	miner := testMinerWithCollateralCache(cache)
+	required := int64(100) * collateralHaoPerCoin
+
+	picks := cache.PickEligible(owner, required, nil)
+	if len(picks) != 0 {
+		t.Fatalf("PickEligible returned candidates from empty cache: %v", picks)
+	}
+	miner.recordSelectorNoEligible(deriveNoEligibleReason(cache, owner, required, nil))
+
+	stats := cache.Stats()
+	if got := stats.SelectorNoEligibleTotal["cache_empty"]; got != 1 {
+		t.Fatalf("cache_empty no-eligible counter = %d, want 1; stats=%#v", got, stats.SelectorNoEligibleTotal)
+	}
+	if stats.CacheUnavailableTotal != 0 {
+		t.Fatalf("cache unavailable total = %d, want 0 for initialized empty cache", stats.CacheUnavailableTotal)
+	}
+	if got := stats.CacheUnavailableByReason["nil_cache"]; got != 0 {
+		t.Fatalf("nil_cache unavailable counter = %d, want 0 for initialized empty cache", got)
+	}
+}
+
+func TestCollateralCacheNonNilAllRecent(t *testing.T) {
+	owner := testOwner(32)
+	cache := newCollateralCacheWithExpectedOwners(collateralCacheBackend{}, owner)
+	miner := testMinerWithCollateralCache(cache)
+	op := testOutPoint(32, 0)
+	required := int64(100) * collateralHaoPerCoin
+	excluded := map[wire.OutPoint]struct{}{op: struct{}{}}
+
+	putTestCollateralEntry(cache, op, owner, int64(150)*collateralHaoPerCoin, common.FeeCoinTyp, StateEligible)
+	picks := cache.PickEligible(owner, required, excluded)
+	if len(picks) != 0 {
+		t.Fatalf("PickEligible returned recent-window candidate: %v", picks)
+	}
+	miner.recordSelectorNoEligible(deriveNoEligibleReason(cache, owner, required, excluded))
+
+	stats := cache.Stats()
+	if got := stats.SelectorNoEligibleTotal["recent_window"]; got != 1 {
+		t.Fatalf("recent_window no-eligible counter = %d, want 1; stats=%#v", got, stats.SelectorNoEligibleTotal)
+	}
+}
+
+func TestCollateralCacheNilRefusesCleanly(t *testing.T) {
+	miner := &CPUMiner{}
+	miner.recordCacheUnavailable("nil_cache")
+
+	stats := miner.fallbackCollateralStats()
+	if stats.CacheUnavailableTotal != 1 {
+		t.Fatalf("cache unavailable total = %d, want 1", stats.CacheUnavailableTotal)
+	}
+	if got := stats.CacheUnavailableByReason["nil_cache"]; got != 1 {
+		t.Fatalf("nil_cache counter = %d, want 1; stats=%#v", got, stats.CacheUnavailableByReason)
+	}
+
+	contents, err := os.ReadFile("mining.go")
+	if err != nil {
+		t.Fatalf("read mining.go: %v", err)
+	}
+	source := string(contents)
+	if !strings.Contains(source, "recordCacheUnavailable(\"nil_cache\")") {
+		t.Fatalf("mining.go cache-nil record path missing")
+	}
+	if !strings.Contains(source, "Process exit is an explicit operator policy and is not the default of this build") {
+		t.Fatalf("mining.go cache-nil operator-policy log phrase missing")
+	}
+}
+
+func TestSelectorMinerGapNilDataRefuses(t *testing.T) {
+	assertSelectorChainContextRefusal(t, "miner_gap", &chainutil.BlockNode{}, errSafeNodeNilData, "miner_gap|nil_data")
+}
+
+func TestSelectorMinerGapNilNodeRefuses(t *testing.T) {
+	assertSelectorChainContextRefusal(t, "miner_gap", nil, errSafeNodeNilNode, "miner_gap|nil_node")
+}
+
+func TestSelectorMinerGapWrongTypeRefuses(t *testing.T) {
+	assertSelectorChainContextRefusal(t, "miner_gap", &chainutil.BlockNode{Data: wrongCollateralNodeData{}}, errSafeNodeWrongType, "miner_gap|wrong_type")
+}
+
+func TestSelectorParentHeaderNilChainChoiceRefuses(t *testing.T) {
+	assertSelectorChainContextRefusal(t, "parent_header", nil, errSafeNodeNilNode, "parent_header|nil_node")
+}
+
+func TestSelectorParentHeaderNilDataRefuses(t *testing.T) {
+	assertSelectorChainContextRefusal(t, "parent_header", &chainutil.BlockNode{}, errSafeNodeNilData, "parent_header|nil_data")
+}
+
+func TestSelectorParentHeaderWrongTypeRefuses(t *testing.T) {
+	assertSelectorChainContextRefusal(t, "parent_header", &chainutil.BlockNode{Data: wrongCollateralNodeData{}}, errSafeNodeWrongType, "parent_header|wrong_type")
+}
+
+func TestSelectorRecentWindowNilDataRefuses(t *testing.T) {
+	assertSelectorChainContextRefusal(t, "recent_window", &chainutil.BlockNode{}, errSafeNodeNilData, "recent_window|nil_data")
+}
+
+func TestSelectorRecentWindowNilNodeRefuses(t *testing.T) {
+	assertSelectorChainContextRefusal(t, "recent_window", nil, errSafeNodeNilNode, "recent_window|nil_node")
+}
+
+func TestSelectorRecentWindowWrongTypeRefuses(t *testing.T) {
+	assertSelectorChainContextRefusal(t, "recent_window", &chainutil.BlockNode{Data: wrongCollateralNodeData{}}, errSafeNodeWrongType, "recent_window|wrong_type")
+}
+
+func TestStartupReadinessGaugeSet(t *testing.T) {
+	cache := newCollateralCacheWithExpectedOwners(collateralCacheBackend{})
+	miner := &CPUMiner{
+		g:               &mining.BlkTmplGenerator{},
+		discreteMining:  true,
+		collateralCache: cache,
+	}
+
+	miner.Start()
+
+	stats := cache.Stats()
+	if !stats.StartupCacheReady {
+		t.Fatalf("startup cache ready gauge = false, want true")
+	}
+}
+
+func TestStartupReadinessGaugeFalseWhenCacheNil(t *testing.T) {
+	miner := &CPUMiner{
+		g:              &mining.BlkTmplGenerator{},
+		discreteMining: true,
+	}
+
+	miner.Start()
+
+	stats := miner.fallbackCollateralStats()
+	if stats.StartupCacheReady {
+		t.Fatalf("fallback startup ready gauge = true, want false")
+	}
+	if got := stats.CacheUnavailableByReason["nil_at_startup"]; got != 1 {
+		t.Fatalf("nil_at_startup counter = %d, want 1; stats=%#v", got, stats.CacheUnavailableByReason)
+	}
+}
+
 func putTestCollateralEntry(cache *CollateralCache, op wire.OutPoint, owner [20]byte, amount int64, tokenType uint64, state CollateralState) {
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
@@ -475,6 +660,59 @@ func testTxBlockSpending(op wire.OutPoint) *btcutil.Block {
 	block := &wire.MsgBlock{}
 	block.AddTransaction(tx)
 	return btcutil.NewBlock(block)
+}
+
+func testCollateralMinerHeader(collateral uint32) *wire.MingingRightBlock {
+	return &wire.MingingRightBlock{
+		Version:    0x20000,
+		Timestamp:  time.Unix(1700000000, 0),
+		Bits:       0x207fffff,
+		Collateral: collateral,
+	}
+}
+
+func assertSelectorChainContextRefusal(t *testing.T, site string, node *chainutil.BlockNode, wantErr error, wantKey string) {
+	t.Helper()
+	cache := newCollateralCacheWithExpectedOwners(collateralCacheBackend{})
+	miner := testMinerWithCollateralCache(cache)
+
+	header, err := safeNodeHeader(node)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("%s: safeNodeHeader error = %v, want %v", site, err, wantErr)
+	}
+	if header != nil {
+		t.Fatalf("%s: safeNodeHeader returned header on failure: %v", site, header)
+	}
+	miner.recordChainContextUnavailable(site, err)
+
+	stats := cache.Stats()
+	if got := stats.ChainContextUnavailableTotal[wantKey]; got != 1 {
+		t.Fatalf("%s: counter %s = %d, want 1; stats=%#v", site, wantKey, got, stats.ChainContextUnavailableTotal)
+	}
+}
+
+type wrongCollateralNodeData struct{}
+
+func (wrongCollateralNodeData) TimeStamp() int64 {
+	return 0
+}
+
+func (wrongCollateralNodeData) GetNonce() int32 {
+	return 0
+}
+
+func (wrongCollateralNodeData) GetBits() uint32 {
+	return 0
+}
+
+func (wrongCollateralNodeData) SetBits(uint32) {}
+
+func (wrongCollateralNodeData) GetVersion() uint32 {
+	return 0
+}
+
+func (wrongCollateralNodeData) GetContractExec() uint32 {
+	return 0
 }
 
 func testMinerBlockUsing(op wire.OutPoint, height int32) *wire.MinerBlock {

@@ -127,6 +127,8 @@ type CPUMiner struct {
 	Stale             bool
 	collateralCacheMu sync.Mutex
 	collateralCache   *CollateralCache
+	collateralStatsMu sync.Mutex
+	collateralStats   CollateralCacheStats
 }
 
 // speedMonitor handles tracking the number of hashes per second the mining
@@ -591,8 +593,14 @@ out:
 		mtch := false
 		qc := chainChoice
 		es := ""
+		var chainContextErr error
 		for i := 0; i < wire.MinerGap && qc != nil && !mtch; i++ {
-			p := NodetoHeader(qc)
+			pHdr, err := safeNodeHeader(qc)
+			if err != nil {
+				chainContextErr = err
+				break
+			}
+			p := *pHdr
 			qc = qc.Parent
 			for _, s := range m.cfg.ExternalIPs {
 				if bytes.Compare(p.Connection, []byte(s)) == 0 {
@@ -606,6 +614,14 @@ out:
 					es += s.String()
 				}
 			}
+		}
+		if chainContextErr != nil {
+			m.recordChainContextUnavailable("miner_gap", chainContextErr)
+			m.submitBlockLock.Unlock()
+			m.Stale = true
+			log.Errorf("miner.generateBlocks: chain context unavailable in miner-gap walk: %v", chainContextErr)
+			time.Sleep(time.Second * 5)
+			continue
 		}
 
 		if mtch {
@@ -630,20 +646,69 @@ out:
 		var minerAddress [20]byte
 		copy(minerAddress[:], signAddr.ScriptAddress())
 
-		parentHeader := m.g.Chain.Miners.NodetoHeader(chainChoice)
+		if chainChoice == nil {
+			m.recordChainContextUnavailable("parent_header", errSafeNodeNilNode)
+			m.submitBlockLock.Unlock()
+			m.Stale = true
+			log.Errorf("miner.generateBlocks: nil chainChoice; cannot resolve parent header")
+			time.Sleep(time.Second * 5)
+			continue
+		}
+		parentHdrPtr, err := safeNodeHeader(chainChoice)
+		if err != nil {
+			m.recordChainContextUnavailable("parent_header", err)
+			m.submitBlockLock.Unlock()
+			m.Stale = true
+			log.Errorf("miner.generateBlocks: parent header unavailable: %v", err)
+			time.Sleep(time.Second * 5)
+			continue
+		}
+		parentHeader := *parentHdrPtr
 		requiredAmount := int64(parentHeader.Collateral) * collateralHaoPerCoin
 		excluded := make(map[wire.OutPoint]struct{})
 
+		var recentWindowErr error
+		var recentWindowDepth int32
 		for p, i := chainChoice, int32(0); i <= m.cfg.ChainParams.ViolationReportDeadline && p != nil; i++ {
-			if q := m.g.Chain.Miners.NodetoHeader(p).Utxos; q != nil {
+			pHdr, err := safeNodeHeader(p)
+			if err != nil {
+				recentWindowErr = err
+				recentWindowDepth = i
+				break
+			}
+			if q := pHdr.Utxos; q != nil {
 				excluded[*q] = struct{}{}
 			}
 			p = p.Parent
 		}
+		if recentWindowErr != nil {
+			m.recordChainContextUnavailable("recent_window", recentWindowErr)
+			m.submitBlockLock.Unlock()
+			m.Stale = true
+			log.Errorf("miner.generateBlocks: recent-window header unavailable at depth %d: %v", recentWindowDepth, recentWindowErr)
+			time.Sleep(time.Second * 5)
+			continue
+		}
 
 		var eligible []wire.OutPoint
-		if m.collateralCache != nil {
-			eligible = m.collateralCache.PickEligible(minerAddress, requiredAmount, excluded)
+		cache := m.currentCollateralCache()
+		if cache == nil {
+			// A nil cache is selector infrastructure failure.  This is
+			// distinct from a non-nil cache with zero eligible entries below,
+			// which preserves the existing licensed/unlicensed no-candidate
+			// behavior.
+			m.recordCacheUnavailable("nil_cache")
+			log.Errorf("miner.generateBlocks: collateral cache unavailable; refusing to mine. Process exit is an explicit operator policy and is not the default of this build.")
+			m.submitBlockLock.Unlock()
+			m.Stale = true
+			time.Sleep(time.Second * 5)
+			continue
+		}
+		eligible = cache.PickEligible(minerAddress, requiredAmount, excluded)
+		if len(eligible) == 0 {
+			// No eligible collateral is a selector result, not cache
+			// infrastructure failure.
+			m.recordSelectorNoEligible(deriveNoEligibleReason(cache, minerAddress, requiredAmount, excluded))
 		}
 		k := len(eligible)
 
@@ -871,6 +936,7 @@ func (m *CPUMiner) Start() {
 		log.Infof("collateral cache persisted load audit: loaded=%d not_found=%d token_mismatch=%d owner_mismatch=%d",
 			audit.Loaded, audit.NotFound, audit.TokenMismatch, audit.OwnerMismatch)
 	}
+	m.recordStartupReady()
 
 	// Nothing to do if the miner is already running or if running in
 	// discrete mode (using GenerateNBlocks).
