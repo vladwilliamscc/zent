@@ -69,6 +69,11 @@ var (
 	defaultLogDir      = filepath.Join(defaultHomeDir, defaultLogDirname)
 )
 
+var (
+	initLogRotatorFunc         = initLogRotator
+	parseAndSetDebugLevelsFunc = parseAndSetDebugLevels
+)
+
 // runServiceCommand is only set to a real function on Windows.  It is used
 // to parse and execute service commands specified via the -s flag.
 var runServiceCommand func(string) error
@@ -81,6 +86,7 @@ type config struct {
 	ConfigFile           string        `short:"C" long:"configfile" description:"Path to configuration file"`
 	DataDir              string        `short:"b" long:"datadir" description:"Directory to store data"`
 	LogDir               string        `long:"logdir" description:"Directory to log output."`
+	SVPDataDir           string        `long:"svpdatadir" description:"Base directory for SVP child-chain data; child net magic namespace is appended"`
 	AddPeers             []string      `short:"a" long:"addpeer" description:"Add a peer to connect with at startup"`
 	ConnectPeers         []string      `long:"connect" description:"Connect only to the specified peers at startup"`
 	DisableListen        bool          `long:"nolisten" description:"Disable listening for incoming connections -- NOTE: Listening is automatically disabled if the --connect or --proxy options are used without also specifying listen interfaces via --listen"`
@@ -180,6 +186,23 @@ type config struct {
 	Blacklist       []string `long:"blacklist" description:"Put address in blacklist"`
 	RpcLimit        int      `long:"rpclimit" description:"Return size limit (KB) of RPC calls"`
 	Passive         bool
+}
+
+type loadConfigOptions struct {
+	DataDirBase         string
+	DataDirNamespace    string
+	RuntimeIsolation    bool
+	InitLogRotator      bool
+	ApplyDebugLevels    bool
+	NormalizeLogDir     bool
+	RejectChildGroupKey bool
+}
+
+type applyConfigOptions struct {
+	DataDirNamespace string
+	InitLogRotator   bool
+	ApplyDebugLevels bool
+	NormalizeLogDir  bool
 }
 
 // serviceOptions defines the configuration options for the daemon as a service on
@@ -399,6 +422,14 @@ func newConfigParser(cfg *config, so *serviceOptions, options flags.Options) *fl
 	return parser
 }
 
+func defaultLoadConfigOptions() loadConfigOptions {
+	return loadConfigOptions{
+		InitLogRotator:   true,
+		ApplyDebugLevels: true,
+		NormalizeLogDir:  true,
+	}
+}
+
 // loadConfig initializes and parses the config using a config file and command
 // line options.
 //
@@ -412,6 +443,95 @@ func newConfigParser(cfg *config, so *serviceOptions, options flags.Options) *fl
 // while still allowing the user to override settings with config files and
 // command line options.  Command line options always take precedence.
 func loadConfig(sec string, omegaNet uint32, p *config, params *chaincfg.GlobalParams) (*config, []string, error) {
+	return loadConfigWithOptions(sec, omegaNet, p, params, defaultLoadConfigOptions())
+}
+
+var childRuntimeIsolatedKeys = map[string]struct{}{
+	"datadir":    {},
+	"logdir":     {},
+	"listen":     {},
+	"rpclisten":  {},
+	"externalip": {},
+	"testnet":    {},
+	"regtest":    {},
+	"simnet":     {},
+	"svpdatadir": {},
+}
+
+func rejectChildRuntimeConfigKeys(configFile, section string) error {
+	file, err := os.Open(configFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	inSection := false
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") {
+			continue
+		}
+
+		if strings.HasPrefix(line, "[") {
+			end := strings.Index(line, "]")
+			if end < 0 {
+				inSection = false
+				continue
+			}
+			name := strings.TrimSpace(line[1:end])
+			inSection = name == section
+			continue
+		}
+
+		if !inSection {
+			continue
+		}
+
+		key, ok := iniOptionKey(line)
+		if !ok {
+			continue
+		}
+		if _, blocked := childRuntimeIsolatedKeys[key]; blocked {
+			return fmt.Errorf("child chain group [%s] may not set runtime-isolated option: %s", section, key)
+		}
+	}
+	return scanner.Err()
+}
+
+func iniOptionKey(line string) (string, bool) {
+	idx := strings.Index(line, "=")
+	colon := strings.Index(line, ":")
+	if idx < 0 || (colon >= 0 && colon < idx) {
+		idx = colon
+	}
+	if idx <= 0 {
+		return "", false
+	}
+
+	key := strings.ToLower(strings.TrimSpace(line[:idx]))
+	if key == "" {
+		return "", false
+	}
+	return key, true
+}
+
+func deriveSVPDataBase(mainFinalDataDir, configuredSVPDataDir string) (string, error) {
+	if configuredSVPDataDir != "" {
+		return cleanAndExpandPath(configuredSVPDataDir), nil
+	}
+
+	parent := filepath.Dir(mainFinalDataDir)
+	if parent == "." || parent == string(filepath.Separator) {
+		return "", fmt.Errorf("cannot derive SVP data base from %q", mainFinalDataDir)
+	}
+	return parent, nil
+}
+
+func loadConfigWithOptions(sec string, omegaNet uint32, p *config, params *chaincfg.GlobalParams, opts loadConfigOptions) (*config, []string, error) {
 	// Default config.
 	cfg := config{
 		ConfigFile:           defaultConfigFile,
@@ -501,6 +621,13 @@ func loadConfig(sec string, omegaNet uint32, p *config, params *chaincfg.GlobalP
 	if sec != "" {
 		parser.AddGroup(sec, sec, &cfg)
 	}
+	if opts.RejectChildGroupKey && sec != "" {
+		if err := rejectChildRuntimeConfigKeys(preCfg.ConfigFile, sec); err != nil {
+			fmt.Fprintf(os.Stderr, "Error parsing config file: %v\n", err)
+			fmt.Fprintln(os.Stderr, usageMessage)
+			return nil, nil, err
+		}
+	}
 
 	if !(preCfg.RegressionTest || preCfg.SimNet) || preCfg.ConfigFile !=
 		defaultConfigFile {
@@ -547,6 +674,19 @@ func loadConfig(sec string, omegaNet uint32, p *config, params *chaincfg.GlobalP
 		}
 	}
 
+	if opts.RuntimeIsolation {
+		if opts.DataDirBase == "" || opts.DataDirNamespace == "" {
+			return nil, nil, fmt.Errorf("child runtime isolation requires data dir base and namespace")
+		}
+		cfg.DataDir = opts.DataDirBase
+		cfg.Listeners = nil
+		cfg.RPCListeners = nil
+		cfg.ExternalIPs = nil
+		cfg.TestNet = false
+		cfg.SimNet = false
+		cfg.RegressionTest = false
+	}
+
 	// Create the home directory if it doesn't already exist.
 	funcName := "loadConfig"
 	err = os.MkdirAll(defaultHomeDir, 0700)
@@ -575,7 +715,12 @@ func loadConfig(sec string, omegaNet uint32, p *config, params *chaincfg.GlobalP
 		params = &activeNetParams.GlobalParams
 	}
 
-	err = applyConfig(&cfg, params)
+	err = applyConfig(&cfg, params, applyConfigOptions{
+		DataDirNamespace: opts.DataDirNamespace,
+		InitLogRotator:   opts.InitLogRotator,
+		ApplyDebugLevels: opts.ApplyDebugLevels,
+		NormalizeLogDir:  opts.NormalizeLogDir,
+	})
 
 	// Warn about missing config file only after all other configuration is
 	// done.  This prevents the warning on help messages and invalid
@@ -587,42 +732,52 @@ func loadConfig(sec string, omegaNet uint32, p *config, params *chaincfg.GlobalP
 	return &cfg, remainingArgs, err
 }
 
-func applyConfig(cfg *config, params *chaincfg.GlobalParams) error {
+func applyConfig(cfg *config, params *chaincfg.GlobalParams, opts applyConfigOptions) error {
 	// Append the network type to the data directory so it is "namespaced"
 	// per network.  In addition to the block database, there are other
 	// pieces of data that are saved to disk such as address manager state.
 	// All data is specific to a network, so namespacing the data directory
 	// means each individual piece of serialized data does not have to
 	// worry about changing names per network and such.
+	namespace := opts.DataDirNamespace
+	if namespace == "" {
+		namespace = netName(activeNetParams)
+	}
 	cfg.DataDir = cleanAndExpandPath(cfg.DataDir)
-	cfg.DataDir = filepath.Join(cfg.DataDir, netName(activeNetParams))
+	cfg.DataDir = filepath.Join(cfg.DataDir, namespace)
 
 	funcName := "loadConfig"
 	appName := filepath.Base(os.Args[0])
 	appName = strings.TrimSuffix(appName, filepath.Ext(appName))
 	usageMessage := fmt.Sprintf("Use %s -h to show usage", appName)
 
-	// Append the network type to the log directory so it is "namespaced"
-	// per network in the same fashion as the data directory.
-	cfg.LogDir = cleanAndExpandPath(cfg.LogDir)
-	cfg.LogDir = filepath.Join(cfg.LogDir, netName(activeNetParams))
+	if opts.NormalizeLogDir {
+		// Append the network type to the log directory so it is "namespaced"
+		// per network in the same fashion as the data directory.
+		cfg.LogDir = cleanAndExpandPath(cfg.LogDir)
+		cfg.LogDir = filepath.Join(cfg.LogDir, netName(activeNetParams))
+	}
 
 	// Special show command to list supported subsystems and exit.
-	if cfg.DebugLevel == "show" {
+	if cfg.DebugLevel == "show" && opts.ApplyDebugLevels {
 		fmt.Println("Supported subsystems", supportedSubsystems())
 		os.Exit(0)
 	}
 
 	// Initialize log rotation.  After log rotation has been initialized, the
 	// logger variables may be used.
-	initLogRotator(filepath.Join(cfg.LogDir, defaultLogFilename))
+	if opts.InitLogRotator {
+		initLogRotatorFunc(filepath.Join(cfg.LogDir, defaultLogFilename))
+	}
 
 	// Parse, validate, and set debug log level(s).
-	if err := parseAndSetDebugLevels(cfg.DebugLevel); err != nil {
-		err := fmt.Errorf("%s: %v", funcName, err.Error())
-		fmt.Fprintln(os.Stderr, err)
-		fmt.Fprintln(os.Stderr, usageMessage)
-		return err
+	if opts.ApplyDebugLevels {
+		if err := parseAndSetDebugLevelsFunc(cfg.DebugLevel); err != nil {
+			err := fmt.Errorf("%s: %v", funcName, err.Error())
+			fmt.Fprintln(os.Stderr, err)
+			fmt.Fprintln(os.Stderr, usageMessage)
+			return err
+		}
 	}
 
 	// Validate database type.
