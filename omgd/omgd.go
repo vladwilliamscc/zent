@@ -9,8 +9,6 @@ import (
 	"btcd/chaincfg"
 	"bytes"
 	"encoding/hex"
-	"regexp"
-	"strings"
 
 	//	"encoding/hex"
 	"btcd/wire"
@@ -603,7 +601,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	rootddata, rootlog := tcfg.DataDir, tcfg.LogDir
+	rootddata := tcfg.DataDir
 
 	setMagic(tcfg)
 
@@ -794,18 +792,21 @@ func main() {
 
 		fmt.Printf("loading SVP options, ChainID = %d magic = %x\n", c.ChainID, uint32(dparams.Net))
 
-		vcfg := &config{}
+		svpDataBase, err := deriveSVPDataBase(rootddata, tcfg.SVPDataDir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Unable to derive SVP data directory: %v\n", err)
+			os.Exit(1)
+		}
 
-		re := regexp.MustCompile("/|\\\\")
-		parts := re.Split(rootddata, -1)
-		parts = append(parts[:len(parts)-2], svpid, parts[len(parts)-2])
-		vcfg.DataDir = strings.Join(parts, "/")
-
-		parts = re.Split(rootlog, -1)
-		parts = append(parts[:len(parts)-2], svpid, parts[len(parts)-2])
-		vcfg.LogDir = strings.Join(parts, "/")
-
-		vcfg, _, err = loadConfig(svpid, dparams.Net, vcfg, dparams)
+		vcfg, _, err := loadConfigWithOptions(svpid, dparams.Net, nil, dparams, loadConfigOptions{
+			DataDirBase:         svpDataBase,
+			DataDirNamespace:    svpid,
+			RuntimeIsolation:    true,
+			InitLogRotator:      false,
+			ApplyDebugLevels:    false,
+			NormalizeLogDir:     false,
+			RejectChildGroupKey: true,
+		})
 		if vcfg == nil || err != nil {
 			os.Exit(1)
 		}
@@ -822,7 +823,6 @@ func main() {
 		vcfg.miningAddrs = nil
 		vcfg.TxIndex = false
 		vcfg.AddrIndex = false
-		vcfg.TestNet = tcfg.TestNet
 		//		vcfg.NoCFilters = true
 		vcfg.signAddress = nil
 
