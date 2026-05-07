@@ -87,6 +87,7 @@ type config struct {
 	DataDir              string        `short:"b" long:"datadir" description:"Directory to store data"`
 	LogDir               string        `long:"logdir" description:"Directory to log output."`
 	SVPDataDir           string        `long:"svpdatadir" description:"Base directory for SVP child-chain data; child net magic namespace is appended"`
+	NoSVP                bool          `long:"nosvp" description:"Disable automatic SVP child-chain startup"`
 	AddPeers             []string      `short:"a" long:"addpeer" description:"Add a peer to connect with at startup"`
 	ConnectPeers         []string      `long:"connect" description:"Connect only to the specified peers at startup"`
 	DisableListen        bool          `long:"nolisten" description:"Disable listening for incoming connections -- NOTE: Listening is automatically disabled if the --connect or --proxy options are used without also specifying listen interfaces via --listen"`

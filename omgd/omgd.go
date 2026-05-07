@@ -60,6 +60,10 @@ type Protocol struct {
 
 var protocols []*Protocol
 
+func shouldStartSVPChildren(cfg *config) bool {
+	return !cfg.NoSVP
+}
+
 func prepareServer(tcfg *config, pdb database.DB, cd *chainmap.ChainDescriptor, svp bool) (*Protocol, bool) {
 	// Get a channel that will be closed when a shutdown signal has been
 	// triggered either from an OS signal such as SIGINT (Ctrl+C) or from
@@ -337,7 +341,6 @@ func runserver(p *Protocol) {
 	}
 
 	if p.running {
-		wg.Add(1)
 		p.Server.Start()
 	}
 
@@ -775,81 +778,85 @@ func main() {
 		shutdownRequestChannel <- struct{}{}
 	}
 
-	for _, c := range chainmap.AllChains[Server.chainParams.MainChainID].ChainMap {
-		if c.ChainID == Server.chainParams.ChainID {
-			continue
-		}
-		if c.ChainID != Server.chainParams.ParentChainId && c.Parent != Server.chainParams.ChainID {
-			continue
-		}
-		time.Sleep(1 * time.Second)
-		dparams := &chaincfg.GlobalParams{}
-		if err := json.Unmarshal([]byte(c.GlobalParams), dparams); err != nil {
-			os.Exit(1)
-		}
-
-		svpid := fmt.Sprintf("%x", uint32(dparams.Net))
-
-		fmt.Printf("loading SVP options, ChainID = %d magic = %x\n", c.ChainID, uint32(dparams.Net))
-
-		svpDataBase, err := deriveSVPDataBase(rootddata, tcfg.SVPDataDir)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Unable to derive SVP data directory: %v\n", err)
-			os.Exit(1)
-		}
-
-		vcfg, _, err := loadConfigWithOptions(svpid, dparams.Net, nil, dparams, loadConfigOptions{
-			DataDirBase:         svpDataBase,
-			DataDirNamespace:    svpid,
-			RuntimeIsolation:    true,
-			InitLogRotator:      false,
-			ApplyDebugLevels:    false,
-			NormalizeLogDir:     false,
-			RejectChildGroupKey: true,
-		})
-		if vcfg == nil || err != nil {
-			os.Exit(1)
-		}
-
-		vcfg.NetMagic = dparams.Net
-		vcfg.GenerateMiner = false
-		vcfg.Generate = false
-		vcfg.privateKeys = nil
-		vcfg.PrivKeys = nil
-		vcfg.MiningAddrs = nil
-		vcfg.AddrIndex = false
-		vcfg.BlocksOnly = false
-		vcfg.DisablePOWMining = true
-		vcfg.miningAddrs = nil
-		vcfg.TxIndex = false
-		vcfg.AddrIndex = false
-		//		vcfg.NoCFilters = true
-		vcfg.signAddress = nil
-
-		fmt.Printf("datadir = %s\n", vcfg.DataDir)
-
-		// svp chain
-		q, quit := prepareServer(vcfg, nil, c, true)
-		if quit || q == nil {
-			if q != nil {
-				cleanup(q)
+	if shouldStartSVPChildren(tcfg) {
+		for _, c := range chainmap.AllChains[Server.chainParams.MainChainID].ChainMap {
+			if c.ChainID == Server.chainParams.ChainID {
+				continue
 			}
-			chainmap.Close()
-			for _, r := range protocols {
-				cleanup(r)
+			if c.ChainID != Server.chainParams.ParentChainId && c.Parent != Server.chainParams.ChainID {
+				continue
 			}
-			os.Exit(1)
+			time.Sleep(1 * time.Second)
+			dparams := &chaincfg.GlobalParams{}
+			if err := json.Unmarshal([]byte(c.GlobalParams), dparams); err != nil {
+				os.Exit(1)
+			}
+
+			svpid := fmt.Sprintf("%x", uint32(dparams.Net))
+
+			fmt.Printf("loading SVP options, ChainID = %d magic = %x\n", c.ChainID, uint32(dparams.Net))
+
+			svpDataBase, err := deriveSVPDataBase(rootddata, tcfg.SVPDataDir)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Unable to derive SVP data directory: %v\n", err)
+				os.Exit(1)
+			}
+
+			vcfg, _, err := loadConfigWithOptions(svpid, dparams.Net, nil, dparams, loadConfigOptions{
+				DataDirBase:         svpDataBase,
+				DataDirNamespace:    svpid,
+				RuntimeIsolation:    true,
+				InitLogRotator:      false,
+				ApplyDebugLevels:    false,
+				NormalizeLogDir:     false,
+				RejectChildGroupKey: true,
+			})
+			if vcfg == nil || err != nil {
+				os.Exit(1)
+			}
+
+			vcfg.NetMagic = dparams.Net
+			vcfg.GenerateMiner = false
+			vcfg.Generate = false
+			vcfg.privateKeys = nil
+			vcfg.PrivKeys = nil
+			vcfg.MiningAddrs = nil
+			vcfg.AddrIndex = false
+			vcfg.BlocksOnly = false
+			vcfg.DisablePOWMining = true
+			vcfg.miningAddrs = nil
+			vcfg.TxIndex = false
+			vcfg.AddrIndex = false
+			//		vcfg.NoCFilters = true
+			vcfg.signAddress = nil
+
+			fmt.Printf("datadir = %s\n", vcfg.DataDir)
+
+			// svp chain
+			q, quit := prepareServer(vcfg, nil, c, true)
+			if quit || q == nil {
+				if q != nil {
+					cleanup(q)
+				}
+				chainmap.Close()
+				for _, r := range protocols {
+					cleanup(r)
+				}
+				os.Exit(1)
+			}
+
+			q.activeNetParams.MainChainID = protocols[0].activeNetParams.ChainID
+			q.Server.chain.MainChain = protocols[0].Server.chain
+
+			protocols = append(protocols, q)
 		}
-
-		q.activeNetParams.MainChainID = protocols[0].activeNetParams.ChainID
-		q.Server.chain.MainChain = protocols[0].Server.chain
-
-		protocols = append(protocols, q)
+	} else {
+		btcdLog.Infof("SVP child-chain startup disabled by --nosvp")
 	}
 
 	for i, p := range protocols {
 		p.running = true
-
+		wg.Add(1)
 		go runserver(p)
 
 		if i > 0 {
