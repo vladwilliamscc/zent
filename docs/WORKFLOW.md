@@ -4,7 +4,16 @@ Date: 2026-05-07
 
 `zent-public` adopts the generic Review-Gated Development Workflow R2.
 
-Canonical local source:
+Canonical public source:
+
+```text
+https://github.com/ezforce/review-gated-agent-workflow/blob/8494ce7/docs/review-gated-development-workflow-r2.md
+https://github.com/ezforce/review-gated-agent-workflow/blob/8494ce7/docs/multi-reviewer-gate-r1.md
+https://github.com/ezforce/review-gated-agent-workflow/blob/8494ce7/docs/worktree-hygiene-r1.md
+https://github.com/ezforce/review-gated-agent-workflow/blob/8494ce7/docs/project-adoption-guide-r1.md
+```
+
+Local mirror:
 
 ```text
 ../review-gated-agent-workflow/docs/review-gated-development-workflow-r2.md
