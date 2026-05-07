@@ -20,6 +20,8 @@ repository; wallet work lives in the sibling `zentwallet` repository.
 
 Start with:
 
+- `AGENTS.md` / `CLAUDE.md` - repository-level agent instructions, including
+  public/private boundary and review-gated workflow rules.
 - `Process.md` - current PR map, branch state, validation posture, and future
   work.
 - `docs/INDEX.md` - documentation index.

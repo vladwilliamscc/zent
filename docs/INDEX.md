@@ -8,6 +8,9 @@ define the current integration branch and development workflow.
 ## Start Here
 
 - `../README.md` - repository-level entry point.
+- `../AGENTS.md` / `../CLAUDE.md` - agent instructions for future Codex /
+  Claude sessions, including the public/private boundary and review-gated
+  workflow.
 - `../Process.md` - public integration progress, PR branch map, and future work.
 - `review-gated-development-workflow-r1.md` - required workflow for future
   public PRs.
