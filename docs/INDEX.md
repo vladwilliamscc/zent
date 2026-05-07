@@ -12,6 +12,7 @@ define the current integration branch and development workflow.
   Claude sessions, including the public/private boundary and review-gated
   workflow.
 - `../Process.md` - public integration progress, PR branch map, and future work.
+- `WORKFLOW.md` - local adoption of the generic review-gated workflow R2.
 - `review-gated-development-workflow-r1.md` - required workflow for future
   public PRs.
 - `public-integration-rpc-cpu-mining-guide.md` - public-safe runbook for

@@ -48,8 +48,15 @@ Before design, implementation, or review work, read:
 README.md
 Process.md
 docs/INDEX.md
+docs/WORKFLOW.md
 docs/review-gated-development-workflow-r1.md
 ```
+
+`docs/WORKFLOW.md` points to the generic Review-Gated Development Workflow R2
+under the sibling `review-gated-agent-workflow` repository. For new public PRs,
+use generic R2 plus the local overrides in `docs/WORKFLOW.md`. The older
+`docs/review-gated-development-workflow-r1.md` remains a project-local snapshot
+and historical reference.
 
 For PR-16 planning, also read:
 
@@ -69,7 +76,7 @@ written.
 ## Required Workflow
 
 Future public PR work must follow the review-gated workflow in
-`docs/review-gated-development-workflow-r1.md`:
+`docs/WORKFLOW.md` and `docs/review-gated-development-workflow-r1.md`:
 
 1. preflight architecture;
 2. architecture review;

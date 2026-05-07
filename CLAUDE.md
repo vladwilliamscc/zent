@@ -36,7 +36,12 @@ Before starting work, read:
 - `README.md`
 - `Process.md`
 - `docs/INDEX.md`
+- `docs/WORKFLOW.md`
 - `docs/review-gated-development-workflow-r1.md`
+
+`docs/WORKFLOW.md` points to the generic Review-Gated Development Workflow R2
+under the sibling `review-gated-agent-workflow` repository. Use generic R2 plus
+the local `zent-public` overrides for new PRs.
 
 For PR-16, also read:
 

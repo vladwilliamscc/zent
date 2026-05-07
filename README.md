@@ -25,6 +25,7 @@ Start with:
 - `Process.md` - current PR map, branch state, validation posture, and future
   work.
 - `docs/INDEX.md` - documentation index.
+- `docs/WORKFLOW.md` - local adoption of the generic review-gated workflow.
 - `docs/review-gated-development-workflow-r1.md` - required workflow for future
   public PRs.
 - `docs/public-integration-rpc-cpu-mining-guide.md` - public-safe runbook for
