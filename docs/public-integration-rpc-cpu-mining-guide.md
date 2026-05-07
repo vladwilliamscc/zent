@@ -15,7 +15,8 @@ Code baseline:
 ```text
 repository: zent-public
 branch:     public/integration-mining-validation
-head:       89293bb merge: integrate PR-15 SVP runtime isolation
+head:       4495f1a docs: update integration mining guide for PR-15
+merge:      89293bb merge: integrate PR-15 SVP runtime isolation
 upstream:   upstream/nexus @ c52f61b
 app:        omgd 0.16.3-beta
 ```
