@@ -328,3 +328,118 @@ func TestChildLoadConfigRequiresIsolationFields(t *testing.T) {
 		t.Fatal("expected missing isolation field error")
 	}
 }
+
+func TestShouldStartSVPChildren(t *testing.T) {
+	if !shouldStartSVPChildren(&config{NoSVP: false}) {
+		t.Fatalf("default config should start SVP children")
+	}
+	if shouldStartSVPChildren(&config{NoSVP: true}) {
+		t.Fatalf("--nosvp config must not start SVP children")
+	}
+}
+
+func TestNoSVPFlagDefaults(t *testing.T) {
+	tempDir := withTestConfigGlobals(t)
+	configFile := filepath.Join(tempDir, "omega.conf")
+	if err := os.WriteFile(configFile, []byte{}, 0600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	os.Args = []string{
+		"omgd",
+		"--datadir=" + filepath.Join(tempDir, "run", "data"),
+		"--logdir=" + filepath.Join(tempDir, "run", "logs"),
+		"--rpcuser=u",
+		"--rpcpass=p",
+		"--configfile=" + configFile,
+	}
+
+	cfg, _, err := loadConfigWithOptions("Main Options", 0, nil, nil, loadConfigOptions{
+		InitLogRotator:   false,
+		ApplyDebugLevels: false,
+		NormalizeLogDir:  false,
+	})
+	if err != nil {
+		t.Fatalf("loadConfigWithOptions error: %v", err)
+	}
+	if cfg.NoSVP {
+		t.Fatalf("default config must leave NoSVP false, got true")
+	}
+	if !shouldStartSVPChildren(cfg) {
+		t.Fatalf("default config must start SVP children")
+	}
+}
+
+func TestNoSVPFlagParses(t *testing.T) {
+	tempDir := withTestConfigGlobals(t)
+	configFile := filepath.Join(tempDir, "omega.conf")
+	if err := os.WriteFile(configFile, []byte{}, 0600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	os.Args = []string{
+		"omgd",
+		"--datadir=" + filepath.Join(tempDir, "run", "data"),
+		"--logdir=" + filepath.Join(tempDir, "run", "logs"),
+		"--rpcuser=u",
+		"--rpcpass=p",
+		"--nosvp",
+		"--configfile=" + configFile,
+	}
+
+	cfg, _, err := loadConfigWithOptions("Main Options", 0, nil, nil, loadConfigOptions{
+		InitLogRotator:   false,
+		ApplyDebugLevels: false,
+		NormalizeLogDir:  false,
+	})
+	if err != nil {
+		t.Fatalf("loadConfigWithOptions error: %v", err)
+	}
+	if !cfg.NoSVP {
+		t.Fatalf("--nosvp must set cfg.NoSVP=true")
+	}
+	if shouldStartSVPChildren(cfg) {
+		t.Fatalf("--nosvp must skip SVP child startup")
+	}
+}
+
+func TestNoSVPWithSVPDataDirIsSilentlyInert(t *testing.T) {
+	tempDir := withTestConfigGlobals(t)
+	configFile := filepath.Join(tempDir, "omega.conf")
+	if err := os.WriteFile(configFile, []byte{}, 0600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	svpDataDir := filepath.Join(tempDir, "operator-svp")
+	os.Args = []string{
+		"omgd",
+		"--datadir=" + filepath.Join(tempDir, "run", "data"),
+		"--logdir=" + filepath.Join(tempDir, "run", "logs"),
+		"--rpcuser=u",
+		"--rpcpass=p",
+		"--nosvp",
+		"--svpdatadir=" + svpDataDir,
+		"--configfile=" + configFile,
+	}
+
+	cfg, _, err := loadConfigWithOptions("Main Options", 0, nil, nil, loadConfigOptions{
+		InitLogRotator:   false,
+		ApplyDebugLevels: false,
+		NormalizeLogDir:  false,
+	})
+	if err != nil {
+		t.Fatalf("loadConfigWithOptions error: %v", err)
+	}
+	if !cfg.NoSVP {
+		t.Fatalf("--nosvp must set cfg.NoSVP=true")
+	}
+	if cfg.SVPDataDir != svpDataDir {
+		t.Fatalf("--svpdatadir not preserved: got %q want %q", cfg.SVPDataDir, svpDataDir)
+	}
+	if shouldStartSVPChildren(cfg) {
+		t.Fatalf("--nosvp must keep child startup gated even when --svpdatadir is set")
+	}
+	if _, err := os.Stat(svpDataDir); !os.IsNotExist(err) {
+		t.Fatalf("svp data dir should not have been created under --nosvp: stat err=%v", err)
+	}
+}
