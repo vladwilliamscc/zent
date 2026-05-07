@@ -11,7 +11,10 @@ handoff aid. Detailed deployment behavior remains in
 
 - Active integration branch: `public/integration-mining-validation`
 - Remote tracking branch: `origin/public/integration-mining-validation`
-- Current head at time of writing: `4495f1a docs: update integration mining guide for PR-15`
+- Current integrated code/runbook baseline before process-documentation updates:
+  `4495f1a docs: update integration mining guide for PR-15`
+- Current HEAD may include later docs-only process/index updates; use
+  `git log -1 --oneline` for the exact local commit.
 - Current integration merge baseline: `89293bb merge: integrate PR-15 SVP runtime isolation`
 - Upstream base branch: `upstream/nexus`
 - Upstream base commit recorded in the integration runbook: `c52f61b`
@@ -66,6 +69,7 @@ or internal review archive material.
 | `public/pr13-selector-defensive-cache-guard` | Historical / integrated | PR-13 selector guard. |
 | `public/pr14-runtime-metrics-foundation` | Historical / integrated | PR-14 runtime metrics foundation. |
 | `public/pr15-svp-runtime-isolation` | Historical / integrated | PR-15 SVP runtime isolation. |
+| `public/pr16-nosvp-mining-only` | Planned / not implemented | Proposed mining-only startup mode that skips SVP child protocol startup when `--nosvp` is set. |
 
 ## Integrated PR Map
 
@@ -255,6 +259,29 @@ Purpose:
 - Prevent child-chain inheritance of main-chain listeners, RPC listeners,
   external IPs, and network-selection flags.
 
+### PR-16: `--nosvp` Mining-Only Startup Mode
+
+Status: planned, not implemented.
+
+Recommended branch:
+
+- `public/pr16-nosvp-mining-only`
+
+Purpose:
+
+- Add an explicit `--nosvp` startup flag for operators that need only the main
+  protocol and mining paths.
+- Keep PR-15 full-node behavior unchanged when `--nosvp` is not set.
+- Skip SVP child protocol creation in no-SVP mode without changing chainmap
+  metadata, consensus, tx-chain validation, miner-chain validation, PoW,
+  collateral selection, reward attribution, or mining worker scheduling.
+- Make process wait-group accounting deterministic when only the main protocol
+  is launched.
+
+Public-safe planning document:
+
+- `docs/public-pr16-nosvp-mining-only-planning-r1.md`
+
 ## Current Validation Posture
 
 This repository is GOPATH-era. The current public integration runbook uses:
@@ -296,7 +323,7 @@ Future public work should use the workflow in
 
 Known candidates for future preflight:
 
-- PR-16 or later public mining hardening;
+- PR-16 `--nosvp` mining-only startup mode;
 - runtime metrics consumption by Route A/B tooling;
 - any renewed midstate / hashing optimization effort;
 - deeper SVP runtime validation;

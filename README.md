@@ -10,6 +10,9 @@ repository; wallet work lives in the sibling `zentwallet` repository.
 
 - Active branch: `public/integration-mining-validation`
 - Current public stack: PR-1 through PR-15 integrated
+- Next planned public PR: PR-16 `--nosvp` mining-only startup mode, currently
+  in review-gated design. Public-safe planning summary:
+  `docs/public-pr16-nosvp-mining-only-planning-r1.md`
 - PR-8 midstate prototype: intentionally not integrated
 - Main operator runbook: `docs/public-integration-rpc-cpu-mining-guide.md`
 

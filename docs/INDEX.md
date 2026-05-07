@@ -13,12 +13,18 @@ define the current integration branch and development workflow.
   public PRs.
 - `public-integration-rpc-cpu-mining-guide.md` - public-safe runbook for
   operating the current `public/integration-mining-validation` branch.
+- `public-pr16-nosvp-mining-only-planning-r1.md` - public-safe planning summary
+  for the proposed PR-16 `--nosvp` mining-only startup mode.
 
 ## Current Integration Context
 
 The current public integration branch includes PR-1 through PR-15. PR-8 is not
 integrated. Use `Process.md` for the PR map and branch status. Use the runbook
 for build, validation, RPC, mining, and SVP runtime layout details.
+
+PR-16 is not implemented on the current integration branch. Its planned public
+scope is documented in `public-pr16-nosvp-mining-only-planning-r1.md`; binding
+implementation work must still go through the review-gated workflow.
 
 ## Documentation Rules
 
